@@ -26,94 +26,79 @@
 #define WIFI_CLIENT_DEF_CONN_TIMEOUT_MS  (3000)
 #define WIFI_CLIENT_MAX_WRITE_RETRY      (10)
 #define WIFI_CLIENT_SELECT_TIMEOUT_US    (1000000)
-#define WIFI_CLIENT_FLUSH_BUFFER_SIZE    (1024)
+#define WIFI_CLIENT_FLUSH_BUFFER_SIZE    (4096)
+#define WIFI_CLIENT_RX_BUFFER_SIZE       (8192)
 
 #undef connect
 #undef write
 #undef read
 
+// Optimized Zero-Allocation receive buffer with larger capacity for throughput
 class WiFiClientRxBuffer {
 private:
-        size_t _size;
-        uint8_t *_buffer;
-        size_t _pos;
-        size_t _fill;
-        int _fd;
-        bool _failed;
+    uint8_t _buffer[WIFI_CLIENT_RX_BUFFER_SIZE];
+    size_t _pos;
+    size_t _fill;
+    int _fd;
+    bool _failed;
 
-        size_t r_available()
-        {
-            if(_fd < 0){
-                return 0;
-            }
-            int count;
+    size_t r_available()
+    {
+        if(_fd < 0){
+            return 0;
+        }
+        int count;
 #ifdef ESP_IDF_VERSION_MAJOR
-            int res = lwip_ioctl(_fd, FIONREAD, &count);
+        int res = lwip_ioctl(_fd, FIONREAD, &count);
 #else
-            int res = lwip_ioctl_r(_fd, FIONREAD, &count);
+        int res = lwip_ioctl_r(_fd, FIONREAD, &count);
 #endif
-            if(res < 0) {
-                _failed = true;
-                return 0;
-            }
-            return count;
+        if(res < 0) {
+            _failed = true;
+            return 0;
         }
+        return count;
+    }
 
-        size_t fillBuffer()
-        {
-            if(!_buffer){
-                _buffer = (uint8_t *)malloc(_size);
-                if(!_buffer) {
-                    log_e("Not enough memory to allocate buffer");
-                    _failed = true;
-                    return 0;
-                }
-            }
-            if(_fill && _pos == _fill){
-                _fill = 0;
-                _pos = 0;
-            }
-            if(!_buffer || _size <= _fill || !r_available()) {
-                return 0;
-            }
-            int res = recv(_fd, _buffer + _fill, _size - _fill, MSG_DONTWAIT);
-            if(res < 0) {
-                if(errno != EWOULDBLOCK) {
-                    _failed = true;
-                }
-                return 0;
-            }
-            _fill += res;
-            return res;
+    bool fillBuffer()
+    {
+        if(WIFI_CLIENT_RX_BUFFER_SIZE <= _fill || !r_available()) {
+            return false;
         }
+        int res = recv(_fd, _buffer + _fill, WIFI_CLIENT_RX_BUFFER_SIZE - _fill, MSG_DONTWAIT);
+        if(res < 0) {
+            if(errno != EWOULDBLOCK) {
+                _failed = true;
+            }
+            return false;
+        }
+        _fill += res;
+        return res > 0;
+    }
 
 public:
-    WiFiClientRxBuffer(int fd, size_t size=1436)
-        :_size(size)
-        ,_buffer(NULL)
-        ,_pos(0)
+    WiFiClientRxBuffer(int fd)
+        :_pos(0)
         ,_fill(0)
         ,_fd(fd)
         ,_failed(false)
-    {
-        //_buffer = (uint8_t *)malloc(_size);
-    }
+    {}
 
     ~WiFiClientRxBuffer()
-    {
-        free(_buffer);
-    }
+    {}
 
     bool failed(){
         return _failed;
     }
 
     int read(uint8_t * dst, size_t len){
-        if(!dst || !len || (_pos == _fill && !fillBuffer())){
+        if(!dst || !len){
             return _failed ? -1 : 0;
         }
+        if(_pos == _fill && !r_available()) return 0;
+
         size_t a = _fill - _pos;
-        if(len <= a || ((len - a) <= (_size - _fill) && fillBuffer() >= (len - a))){
+        if(len <= a){
             if(len == 1){
                 *dst = _buffer[_pos];
             } else {
@@ -122,29 +107,25 @@ public:
             _pos += len;
             return len;
         }
-        size_t left = len;
+
+        // Need to read more data to satisfy request
         size_t toRead = a;
-        uint8_t * buf = dst;
-        memcpy(buf, _buffer + _pos, toRead);
-        _pos += toRead;
-        left -= toRead;
-        buf += toRead;
-        while(left){
-            if(!fillBuffer()){
-                return len - left;
-            }
-            a = _fill - _pos;
-            toRead = (a > left)?left:a;
-            memcpy(buf, _buffer + _pos, toRead);
-            _pos += toRead;
-            left -= toRead;
-            buf += toRead;
+        if(a > 0){
+            memcpy(dst, _buffer + _pos, a);
         }
-        return len;
+
+        _pos = _fill;
+        while(len > a && fillBuffer()){
+            size_t chunk = (len - a > (_fill - _pos)) ? (_fill - _pos) : (len - a);
+            memcpy(dst + a, _buffer + _pos, chunk);
+            _pos += chunk;
+            a += chunk;
+        }
+        return a;
     }
 
     int peek(){
-        if(_pos == _fill && !fillBuffer()){
+        if(_pos == _fill && !r_available()){
             return -1;
         }
         return _buffer[_pos];
@@ -156,7 +137,10 @@ public:
 
     void flush(){
         if(r_available()){
-            fillBuffer();
+            int res = recv(_fd, _buffer + _fill, WIFI_CLIENT_RX_BUFFER_SIZE - _fill, MSG_DONTWAIT);
+            if(res > 0){
+                _fill += res;
+            }
         }
         _pos = _fill;
     }
@@ -279,12 +263,15 @@ int WiFiClient::connect(IPAddress ip, uint16_t port, int32_t timeout_ms)
     }
 
 #define ROE_WIFICLIENT(x,msg) { if (((x)<0)) { log_e("Setsockopt '" msg "'' on fd %d failed. errno: %d, \"%s\"", sockfd, errno, strerror(errno)); return 0; }}
+    int rcvBuf = 8192;
+    setsockopt(sockfd, SOL_SOCKET, SO_SNDBUF, &rcvBuf, sizeof(int)); // Best effort - lwip may not support
+    ROE_WIFICLIENT(setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, &rcvBuf, sizeof(int)),"SO_RCVBUF");
     ROE_WIFICLIENT(setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)),"SO_SNDTIMEO");
     ROE_WIFICLIENT(setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)),"SO_RCVTIMEO");
 
-    // These are also set in WiFiClientSecure, should be set here too?
-    //ROE_WIFICLIENT(setsockopt(sockfd, IPPROTO_TCP, TCP_NODELAY, &enable, sizeof(enable)),"TCP_NODELAY"); 
-    //ROE_WIFICLIENT (setsockopt(sockfd, SOL_SOCKET, SO_KEEPALIVE, &enable, sizeof(enable)),"SO_KEEPALIVE");
+    // Enable TCP_NODELAY (disable Nagle's algorithm) for low-latency small packets
+    int flag = 1;
+    ROE_WIFICLIENT(setsockopt(sockfd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag)),"TCP_NODELAY");
 
     fcntl( sockfd, F_SETFL, fcntl( sockfd, F_GETFL, 0 ) & (~O_NONBLOCK) );
     clientSocketHandle.reset(new WiFiClientSocketHandle(sockfd));
@@ -388,58 +375,36 @@ int WiFiClient::read()
 
 size_t WiFiClient::write(const uint8_t *buf, size_t size)
 {
-    int res =0;
-    int retry = WIFI_CLIENT_MAX_WRITE_RETRY;
-    int socketFileDescriptor = fd();
-    size_t totalBytesSent = 0;
-    size_t bytesRemaining = size;
-
-    if(!_connected || (socketFileDescriptor < 0)) {
+    if(!_connected || (fd() < 0)) {
         return 0;
     }
 
-    while(retry) {
-        //use select to make sure the socket is ready for writing
+    int res = send(fd(), (void*) buf, size, MSG_DONTWAIT);
+    if(res >= 0){
+        return res;
+    }
+
+    // Send failed immediately - check if recoverable (buffer full / interrupted)
+    if(errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR){
+        // Recovery path: quick select with minimal timeout for buffer availability
         fd_set set;
         struct timeval tv;
-        FD_ZERO(&set);        // empties the set
-        FD_SET(socketFileDescriptor, &set); // adds FD to the set
+        FD_ZERO(&set);
+        FD_SET(fd(), &set);
         tv.tv_sec = 0;
-        tv.tv_usec = WIFI_CLIENT_SELECT_TIMEOUT_US;
-        retry--;
+        tv.tv_usec = 50000; // 50ms quick retry window
 
-        if(select(socketFileDescriptor + 1, NULL, &set, NULL, &tv) < 0) {
-            return 0;
+        if(select(fd() + 1, NULL, &set, NULL, &tv) > 0 && FD_ISSET(fd(), &set)){
+            res = send(fd(), (void*) buf, size, MSG_DONTWAIT);
+            return (res >= 0) ? res : 0;
         }
-
-        if(FD_ISSET(socketFileDescriptor, &set)) {
-            res = send(socketFileDescriptor, (void*) buf, bytesRemaining, MSG_DONTWAIT);
-            if(res > 0) {
-                totalBytesSent += res;
-                if (totalBytesSent >= size) {
-                    //completed successfully
-                    retry = 0;
-                } else {
-                    buf += res;
-                    bytesRemaining -= res;
-                    retry = WIFI_CLIENT_MAX_WRITE_RETRY;
-                }
-            }
-            else if(res < 0) {
-                log_e("fail on fd %d, errno: %d, \"%s\"", fd(), errno, strerror(errno));
-                if(errno != EAGAIN) {
-                    //if resource was busy, can try again, otherwise give up
-                    stop();
-                    res = 0;
-                    retry = 0;
-                }
-            }
-            else {
-                // Try again
-            }
-        }
+        // Buffer still full / temporarily unavailable: return 0 (caller retries).
+        // Do NOT stop() here — partial writes are valid in the Arduino Client contract.
+        return 0;
     }
-    return totalBytesSent;
+    // Unrecoverable hard error (e.g. connection reset) — tear down the socket.
+    stop();
+    return 0;
 }
 
 size_t WiFiClient::write_P(PGM_P buf, size_t size)
@@ -449,19 +414,17 @@ size_t WiFiClient::write_P(PGM_P buf, size_t size)
 
 size_t WiFiClient::write(Stream &stream)
 {
-    uint8_t * buf = (uint8_t *)malloc(1360);
-    if(!buf){
-        return 0;
-    }
-    size_t toRead = 0, toWrite = 0, written = 0;
-    size_t available = stream.available();
-    while(available){
-        toRead = (available > 1360)?1360:available;
-        toWrite = stream.readBytes(buf, toRead);
+    // Zero-Allocation: use static buffer (align to 4 bytes for optimal DMA)
+    static uint8_t buf[WIFI_CLIENT_FLUSH_BUFFER_SIZE] __attribute__((aligned(4)));
+    size_t written = 0;
+    while(true){
+        size_t avail = stream.available();
+        if(avail == 0) break;
+        size_t toRead = (avail > WIFI_CLIENT_FLUSH_BUFFER_SIZE) ? WIFI_CLIENT_FLUSH_BUFFER_SIZE : avail;
+        size_t toWrite = stream.readBytes(buf, toRead);
+        if(toWrite == 0) break;
         written += write(buf, toWrite);
-        available = stream.available();
     }
-    free(buf);
     return written;
 }
 
