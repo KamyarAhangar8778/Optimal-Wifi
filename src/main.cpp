@@ -5,6 +5,7 @@
 #include "test_ap.h"
 #include "test_sta.h"
 #include "test_sockets.h"
+#include "test_benchmark.h"
 
 TestStats g_stats;
 
@@ -51,7 +52,7 @@ void setup() {
     g_stats.reset();
     print_banner();
 
-    // Run modular test suites
+    // 1. Run modular verification test suites
     run_generic_tests();
     run_scan_tests();
     run_ap_tests();
@@ -59,9 +60,13 @@ void setup() {
     run_socket_tests();
 
     print_summary();
+
+    // 2. Run Comprehensive Baseline Performance Benchmarks
+    run_all_benchmarks();
 }
 
 void loop() {
-    // Keep idle after tests complete
+    // Keep idle after tests and benchmarks complete
     delay(1000);
 }
+
