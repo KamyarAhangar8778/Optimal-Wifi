@@ -46,7 +46,7 @@ bool WiFiScanClass::_scanAsync = false;
 uint32_t WiFiScanClass::_scanStarted = 0;
 uint32_t WiFiScanClass::_scanTimeout = 10000;
 uint16_t WiFiScanClass::_scanCount = 0;
-void* WiFiScanClass::_scanResult = 0;
+wifi_ap_record_t WiFiScanClass::_scanResult[WIFISCAN_MAX_RESULTS];
 
 /**
  * Start scan WiFi networks available
@@ -110,8 +110,11 @@ void WiFiScanClass::_scanDone()
 {
     esp_wifi_scan_get_ap_num(&(WiFiScanClass::_scanCount));
     if(WiFiScanClass::_scanCount) {
-        WiFiScanClass::_scanResult = new wifi_ap_record_t[WiFiScanClass::_scanCount];
-        if(!WiFiScanClass::_scanResult || esp_wifi_scan_get_ap_records(&(WiFiScanClass::_scanCount), (wifi_ap_record_t*)_scanResult) != ESP_OK) {
+        // Cap to static storage capacity (zero heap allocation)
+        if(WiFiScanClass::_scanCount > WIFISCAN_MAX_RESULTS) {
+            WiFiScanClass::_scanCount = WIFISCAN_MAX_RESULTS;
+        }
+        if(esp_wifi_scan_get_ap_records(&(WiFiScanClass::_scanCount), WiFiScanClass::_scanResult) != ESP_OK) {
             WiFiScanClass::_scanCount = 0;
         }
     }
@@ -127,7 +130,7 @@ void WiFiScanClass::_scanDone()
  */
 void * WiFiScanClass::_getScanInfoByIndex(int i)
 {
-    if(!WiFiScanClass::_scanResult || (size_t) i >= WiFiScanClass::_scanCount) {
+    if((size_t) i >= WiFiScanClass::_scanCount) {
         return 0;
     }
     return reinterpret_cast<wifi_ap_record_t*>(WiFiScanClass::_scanResult) + i;
@@ -163,11 +166,8 @@ int16_t WiFiScanClass::scanComplete()
 void WiFiScanClass::scanDelete()
 {
     WiFiGenericClass::clearStatusBits(WIFI_SCAN_DONE_BIT);
-    if(WiFiScanClass::_scanResult) {
-        delete[] reinterpret_cast<wifi_ap_record_t*>(WiFiScanClass::_scanResult);
-        WiFiScanClass::_scanResult = 0;
-        WiFiScanClass::_scanCount = 0;
-    }
+    // Zero-allocation: no heap to free, just invalidate the count.
+    WiFiScanClass::_scanCount = 0;
 }
 
 

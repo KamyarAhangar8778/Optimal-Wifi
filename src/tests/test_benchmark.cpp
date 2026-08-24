@@ -296,6 +296,37 @@ static void bench_udp_performance() {
                   pps, kbPerSec);
 }
 
+// ==============================================================================
+// Benchmark 1b: WiFi Scan Speed (fast single-channel + BSSIDstr latency)
+// ==============================================================================
+static void bench_scan_speed_fast() {
+    Serial.println("\n[BENCH 1b] WiFi Scan Speed (Optimized):");
+    WiFi.mode(WIFI_STA);
+    WiFi.disconnect();
+    delay(100);
+
+    uint32_t tStart = micros();
+    int16_t countCh11 = WiFi.scanNetworks(false, true, false, 200, 11);
+    uint32_t durCh11 = micros() - tStart;
+    WiFi.scanDelete();
+
+    Serial.printf("  -> Single-Channel Scan (Ch 11): %4u us (Found %d APs)\n",
+                  durCh11, countCh11);
+
+    // BSSIDstr() latency over first few APs (no heap, static buffer)
+    if (countCh11 > 0) {
+        int samples = (countCh11 > 10) ? 10 : countCh11;
+        uint32_t tB = micros();
+        for (int i = 0; i < samples; ++i) {
+            String s = WiFi.BSSIDstr(i);
+        }
+        uint32_t durB = micros() - tB;
+        Serial.printf("  -> BSSIDstr() x %d calls : %4u us (%.1f us avg)\n",
+                      samples, durB, (float)durB / samples);
+        WiFi.scanDelete();
+    }
+}
+
 void run_all_benchmarks() {
     Serial.println();
     Serial.println("##################################################");
@@ -303,6 +334,7 @@ void run_all_benchmarks() {
     Serial.println("##################################################");
 
     bench_scan_speed();
+    bench_scan_speed_fast();
     bench_sta_connection_latency();
     bench_tcp_performance();
     bench_udp_performance();

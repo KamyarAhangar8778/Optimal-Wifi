@@ -25,6 +25,13 @@
 
 #include "WiFiType.h"
 #include "WiFiGeneric.h"
+#include <esp_wifi.h>
+
+// Maximum number of AP records retained per scan (static, zero-allocation).
+// wifi_ap_record_t is ~48 bytes; 32 * 48 = 1536 bytes of BSS static RAM.
+#ifndef WIFISCAN_MAX_RESULTS
+#define WIFISCAN_MAX_RESULTS 32
+#endif
 
 class WiFiScanClass
 {
@@ -55,8 +62,9 @@ protected:
     static uint32_t _scanStarted;
     static uint32_t _scanTimeout;
     static uint16_t _scanCount;
-    
-    static void* _scanResult;
+
+    // Zero-allocation scan storage: static BSS array, no heap/new.
+    static wifi_ap_record_t _scanResult[WIFISCAN_MAX_RESULTS];
 
     static void * _getScanInfoByIndex(int i);
 
