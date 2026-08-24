@@ -1,60 +1,83 @@
 # ARCHITECTURE.md — Optimal-Wifi
 
-> نقشه‌ی سریع پروژه. هر بار که گیج شدی کدوم فایل چیکار می‌کنه، اول اینو بخون،
-
-
----
-
-## 1. نمای کل (Big Picture)
-
-این یه **کتابخونه‌ی WiFi بهینه‌شده برای ESP32/Arduino** هست. سه لایه داره:
-
-| لایه | پوشه | نقش |
-|------|------|-----|
-| **کتابخونه‌ی اصلی** | `lib/WiFi/src/` | پیاده‌سازی کلاس‌های WiFi (STA/AP/Scan/Client/Server/UDP) — تنها کتابخونه‌ای که کامپایل میشه |
-| **کتابخونه‌های کاستوم** | `include/` | ابزارهای بهینه‌سازی (Timer, Error, Events, Optimization, Core/Async) |
-| **تست‌ها** | `src/tests/` | تست سریال که خروجی‌ش رو کاربر از Serial Monitor می‌خونه |
+> نقشه‌ی راه و مرجع معماری پروژه. قبل از شروع هر تغییر یا بهینه‌سازی، این سند را مطالعه کنید.
 
 ---
 
-## 2. ساختار پوشه‌ها
+## ۱. نمای کلی سیستم (System Overview)
+
+این پروژه با هدف **بهینه‌سازی حداکثری سرعت، کاهش تاخیر (Latency) و حذف سربارهای غیرضروری (Zero-Allocation / Lock-Free)** در کتابخانه‌ی رسمی WiFi برای میکروکنترلر ESP32 در پلتفرم Arduino طراحی شده است.
+
+### لایه‌های اصلی:
+
+| لایه | مسیر | نقش و مسئولیت |
+|------|------|---------------|
+| **کتابخانه‌ی اصلی (Target)** | `lib/WiFi/src/` | پیاده‌سازی رسمی و بهینه‌شده‌ی کلاس‌های وایفای (تنها بخشی که کتابخانه را می‌سازد) |
+| **ابزارهای بهینه‌سازی (Custom Tools)** | `include/` | ساختارهای داده بدون تخصیص پویا، تایمرهای سخت‌افزاری/نرم‌افزاری، Async Future و Events |
+| **مجموعه تست و بنچمارک (Test Harness)** | `src/` و `src/tests/` | تست‌های خودکار پورت سریال برای صحت‌سنجی ۱۰۰٪ قابلیت‌ها و سنجش زمان اجرا |
+
+---
+
+## ۲. ساختار دقیق پوشه‌ها و فایل‌ها
 
 ```
 Optimal-Wifi/
 ├── lib/
-│   └── WiFi/        # کتابخونه‌ی اصلی و فعال (اینجا دست می‌زنیم)
-│       ├── src/               # کلاس‌های WiFi + پیاده‌سازی .cpp
-│       │   ├── WiFi.h / WiFi.cpp          # WiFiClass — facade کلی
-│       │   ├── WiFiGeneric.h/.cpp         # ریشه‌ی همه (event, mode, sleep, power)
-│       │   ├── WiFiSTA.h/.cpp             # Station (کلاینت، اتصال به AP)
-│       │   ├── WiFiAP.h/.cpp              # Access Point (سافت‌AP)
-│       │   ├── WiFiScan.h/.cpp            # اسکن شبکه‌ها
-│       │   ├── WiFiClient.h/.cpp          # سوکت TCP کلاینت
-│       │   ├── WiFiServer.h/.cpp          # سوکت TCP سرور
-│       │   ├── WiFiUdp.h/.cpp             # سوکت UDP
-│       │   ├── WiFiMulti.h/.cpp           # اتصال خودکار به لیست APها
-│       │   └── WiFiType.h                 # انوم‌ها و تایپ‌های مشترک
-│       ├── examples/          # مثال‌ها (FTM, WPS, WiFiScan, ...)
-│       ├── library.properties # name=WiFi_Optimized, version=2.0.0
-│       └── keywords.txt
-├── include/                   # کتابخونه‌های کاستوم
+│   └── WiFi/                          # کتابخانه‌ی هدف برای بهینه‌سازی
+│       ├── src/
+│       │   ├── WiFi.h / WiFi.cpp      # Facade اصلی (WiFiClass) مشتق از تمام لایه‌ها
+│       │   ├── WiFiGeneric.h/.cpp     # لایه‌ی ریشه (مدیریت Events، حالت‌ها، Sleep، توان TX)
+│       │   ├── WiFiSTA.h/.cpp         # لایه کلاینت (اتصال به مودم، دریافت IP، مدیریت DHCP)
+│       │   ├── WiFiAP.h/.cpp          # لایه اکسس‌پوینت (سافت‌AP، کانفیگ Subnet و IP محلی)
+│       │   ├── WiFiScan.h/.cpp        # اسکن همگام/ناهمگام شبکه‌های اطراف و پارس BSSID/RSSI
+│       │   ├── WiFiClient.h/.cpp      # سوکت TCP کلاینت و بافرینگ RX/TX
+│       │   ├── WiFiServer.h/.cpp      # سرور TCP با قابلیت پذیرش کلاینت‌ها
+│       │   ├── WiFiUdp.h/.cpp         # سوکت ارسال/دریافت بسته‌های بدون اتصال UDP
+│       │   ├── WiFiMulti.h/.cpp       # مدیریت اتصال هوشمند و خودکار به لیست APها
+│       │   └── WiFiType.h             # تایپ‌ها، انوم‌های وضعیت (wl_status_t) و ماکروها
+│       └── library.properties
+│
+├── include/                           # ابزارهای کاستوم برای شتاب‌دهی (اختیاری)
+│   ├── README                         # راهنمای نحوه استفاده از ابزارهای کاستوم
 │   ├── Core/
-│   │   ├── Error/             # سیستم مدیریت ارور (فقط توی تست‌ها)
-│   │   └── Async/             # Future / Deferred / AsyncResult
-│   ├── Events/                # EventDispatcher (سیستم رویداد)
-│   ├── Optimization/          # کانتینرهای بهینه (Static*, SmallVector, FastFunction, AtomicSharedPtr)
-│   ├── Timer/                 # کتابخونه‌ی تایمر غیر-بلوکینگ
-│   └── Utilities/             # function_traits, logging, sync_clock
+│   │   ├── Async/                     # سیستم ناهمگام (Future, Deferred, Executor)
+│   │   └── Error/                     # ساختار مدیریت خطا و سیاست‌های ثبت ارور
+│   ├── Events/                        # دیسپچر سریع رویدادها (EventDispatcher)
+│   ├── Optimization/                  # ساختارهای داده بهینه (StaticArray, StaticHashMap, SmallVector, FastFunction)
+│   ├── Timer/                         # موتور زمان‌بندی دقیق غیر-بلوکینگ (Hardware/Software Timers)
+│   └── Utilities/                     # ابزارهای کمکی (Logging, Traits, Clock Sync)
+│
 ├── src/
-│   ├── tests/              # تست‌های سریال (test_main + test_*.cpp)
-│   └── Optimization/          # .cpp کانتینرها (ArrayBase, HashMapBase)
-└── platformio.ini             # کانفیگ build (env: esp32dev) → lib_deps = WiFi_Optimized
+│   ├── main.cpp                       # نقطه ورود تست (Runner، نمایش بنر و گزارش وضعیت)
+│   ├── Optimization/                  # پیاده‌سازی سورس‌های کانتینرها (ArrayBase, HashMapBase)
+│   └── tests/                         # ماژول‌های مجزای تست سریال
+│       ├── test_config.h              # متغیرهای تست (SSID, Password, Timeout) و ماکروهای آماری
+│       ├── test_generic.cpp/.h        # تست حالت‌ها، مک‌آدرس، توان، اسلیپ و رویدادها
+│       ├── test_scan.cpp/.h           # تست اسکن سنکرون و آسنکرون
+│       ├── test_ap.cpp/.h             # تست چرخه حیات SoftAP و تنظیم IP سفارشی
+│       ├── test_sta.cpp/.h            # تست اتصال به روتر، DHCP، ریکانکت و استاتیک IP
+│       └── test_sockets.cpp/.h        # تست ارتباط دوطرفه TCP Client/Server و پکت UDP
+│
+└── platformio.ini                     # تنظیمات کامپایلر، بردهای ESP32 و مسیرهای Include
 ```
 
-## 3. نحوه‌ی کامپایل گرفتن
+---
+
+## ۳. قوانین طلایی توسعه و بهینه‌سازی
+
+1. **حفظ کامل امضای توابع عمومی (API Stability):** نام توابع، آرگومان‌های پیش‌فرض و مقادیر بازگشتی عمومی در `lib/WiFi/src/` نباید دستخوش تغییر شوند تا پروژه‌های کاربر بدون خطا کامپایل شوند.
+2. **اولویت مطلق با سرعت (Performance-First):** مجاز به استفاده نامحدود از حافظه RAM و Flash هستیم؛ هدف بیشینه‌سازی سرعت و کمینه‌سازی تاخیر است.
+3. **معیار واقعی درصد بهبود:** پس از هر مرحله ریفکتور، درصد واقعی بهبود سرعت نسبت به نسخه پایه اندازه‌گیری و گزارش می‌شود.
+4. **استاندارد حجم فایل:** هر فایل باید حداکثر بین ۲۰۰ تا ۳۰۰ خط نگه‌داشته شود (به جز فایل‌های هدر و کانفیگ خاص).
+
+---
+
+## ۴. دستورات بیلد و اجرا
 
 ```bash
-# دستور بیلد:
-:\Users\KAVEH\.platformio\penv\Scripts\platformio.exe run
+# بیلد پروژه:
+C:\Users\KAVEH\.platformio\penv\Scripts\platformio.exe run
 
+# مانیتور خروجی سریال (Baud: 115200):
+C:\Users\KAVEH\.platformio\penv\Scripts\platformio.exe device monitor
 ```
