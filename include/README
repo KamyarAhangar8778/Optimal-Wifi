@@ -1,0 +1,586 @@
+# README — راهنمای تخصصی کتابخونه‌های کاستوم (`include/`)
+
+> این فایل **تنها مرجع** استفاده از تمام APIها و متدهای کتابخونه‌های سفارشی پروژه‌ست.
+> هر وقت خواستی از کتابخونه‌های من استفاده کنی، فقط این فایل رو بخون — نیازی به
+> باز کردن تک‌تک هدرها نیست. تمام نام‌فضاها زیر `namespace uniuno` هستن (مگر جایی
+> که تصریح شده). تمام کلاس‌ها کانتینرهای بهینه‌شده برای ESP32/Arduino هستن
+> (بدون تخصیص heap برای سایزهای کوچک، سریع، با حافظه‌ی پیش‌تخصیص‌یافته).
+
+---
+
+## ۰. نحوه‌ی include کردن (نکته‌ی مهم)
+
+تمام هدرها با پسوند نسبی از ریشه‌ی `include/` لینک می‌شن. مثلاً:
+- `#include <Timer/Timer.h>`
+- `#include <Events/EventDispatcher.h>`
+- `#include <Core/Error/ErrorHandler.h>`
+- `#include <Core/Async/Future.h>`
+- `#include <Optimization/SmallVector.h>`
+- `#include <Utilities/logging.h>`
+
+پلتفرمIO آرشیو `include/` رو خودکار به include-path اضافه می‌کنه، پس `Timer/...`
+مستقیم حل می‌شه.
+
+---
+
+## ۱. Timer — کتابخونه‌ی تایمر غیر‌بلوکینگ (Facade)
+
+فایل اصلی: `Timer/Timer.h` — کلاس `Timer` = `TimerBase<32>` (۳۲ تایmer پیش‌فرض).
+
+### ۱-۱. ساختن
+```cpp
+#include <Timer/Timer.h>
+#include <Timer/TimerUnits.h>   // seconds/minutes/hours/days
+using namespace uniuno;
+
+Timer timer;            // پیش‌فرض ۳۲ تایمر، منبع زمان = millis()
+```
+سازنده (امضا):
+```cpp
+TimerBase(const TimerFeatures& features,
+          unsigned long (*getNowInMS)() = millis,
+          EventDispatcher* dispatcher = nullptr)
+```
+- `features`: **فقط ظاهریه** — فعال‌سازی واقعی از طریق `#define` در `TimerConfig.h` است.
+- `getNowInMS`: منبع زمان (پیش‌فرض `millis`). برای تست می‌تونی تابع خودت رو بدی.
+- `dispatcher`: اختیاری؛ اگه `nullptr` باشه هندلرهای ایونت no-op می‌شن.
+
+### ۱-۲. زمان‌سنج‌های یک‌باره و تکرارشونده
+| متد | فلگ | توضیح |
+|-----|-----|-------|
+| `TimerHandle setTimeout(TimerCallback<void()>, unsigned long ms)` | `TIMER_ENABLE_TIMEOUT` | یک‌بار بعد از `ms` |
+| `TimerHandle setImmediate(TimerCallback<void()>)` | `TIMER_ENABLE_IMMEDIATE` | در `tick()` بعدی (۰ms) |
+| `TimerHandle setInterval(TimerCallback<void()>, unsigned long ms)` | `TIMER_ENABLE_INTERVAL` | تکرار هر `ms` |
+| `TimerHandle setInterval(cb, ms, int repeat_count)` | `TIMER_ENABLE_INTERVAL` | تکرار `repeat_count` بار (`0`/منفی = بی‌نهایت) |
+| `TimerHandle set_interval_until(cb, ms, on_timeout, timeout_ms)` | `TIMER_ENABLE_INTERVAL_UNTIL` | poll تا `cb` برگردونه `true` یا `timeout_ms` بگذره |
+| `TimerHandle set_interval_until(bool_cb, ms)` | `TIMER_ENABLE_INTERVAL_UNTIL` | poll تا `bool_cb` برگردونه `true` |
+
+- نوع callback: `TimerCallback<Sig>` = `FastFunction<Sig>` (وقتی `TIMER_ENABLE_OPTIMIZATIONS`).
+  - timeout/interval: امضا `void()`.
+  - interval_until: `bool()`.
+- **محدودیت capture:** تقریباً ۳۲ بایت. برای state بزرگ‌تر از capture `[&]` استفاده کن.
+- نمونه:
+```cpp
+int led = 2;
+timer.set_timeout([led]() { digitalWrite(led, HIGH); }, seconds(5));
+timer.set_interval([]() { Serial.println("tick"); }, 1000);
+auto h = timer.set_interval([]() { Serial.println("x"); }, 500, 3); // ۳ بار
+```
+
+### ۱-۳. مدیریت / لغو
+| متد | فلگ | توضیح |
+|-----|-----|-------|
+| `void clear_timeout(TimerId id)` | `TIMER_ENABLE_CLEAR` + TIMEOUT | لغو timeout |
+| `void clear_interval(TimerId id)` | `TIMER_ENABLE_CLEAR` + INTERVAL | لغو interval |
+| `bool pause(TimerId id)` | همیشه | فریز کردن (reentrant-safe) |
+| `bool resume(TimerId id)` | همیشه | ادامه از همون‌جا |
+| `bool isPaused(TimerId id) const` | همیشه | چک paused |
+
+### ۱-۴. لوپ اصلی (حیاتی)
+```cpp
+void loop() {
+  timer.tick();   // باید هر loop صدا زده بشه — مگر اینکه startHardwareTimer زده باشی
+}
+```
+`tick()` یک fast-path داره: اگه هیچ تایمری نرسیده باشه، `millis()` رو اصلاً صدا نمی‌زنه (غیر‌بلوکینگ).
+حین اجرای callback، `pause/clear` از داخل خود callback ایمنه (deferred flag می‌شه).
+
+### ۱-۵. تایمر سخت‌افزاری (ESP32) — خودکار
+```cpp
+bool  startHardwareTimer(uint64_t interval_us = 1000); // esp_timer هر 1ms صدا می‌زنه
+void  stopHardwareTimer();
+bool  isHardwareTimerActive() const;
+```
+بعد از `startHardwareTimer()` دیگه نیازی به `tick()` در `loop()` نیست. (Singleton: `HardwareTimerTrigger::getInstance()`.)
+
+### ۱-۶. گروه‌های تایمر (Built-in) — `TIMER_ENABLE_GROUPS`
+کلاس `TimerBase` متدهای گروه رو داره (پشت `StaticHashMap<uint32_t, GroupEntry, 16>`):
+```cpp
+void  createGroup(const char* name);
+void  addToGroup(const char* name, TimerId id);
+void  addToGroup(const char* name, TimerHandle handle);
+size_t pauseGroup(const char* name);
+size_t resumeGroup(const char* name);
+size_t clearGroup(const char* name);   // همه رو remove می‌کنه
+bool  removeFromGroup(const char* name, TimerId id);
+bool  removeGroup(const char* name);
+size_t groupSize(const char* name) const;
+bool  hasGroup(const char* name) const;
+```
+(توجه: دو سیستم گروه داریم — اینجا built-in، و `TimerGroup` ایستا در
+`Timer/TimerGroup.h` که `SmallVector<T,8>` داره و جداست. قاطی‌شون نکن.)
+
+### ۱-۷. ایونت‌ها — `TIMER_EVENTS_ENABLED` + `TIMER_EVENT_*`
+فقط وقتی فلگ مربوطه تعریف شده باشه کامپایل می‌شن. هندلرها روی `dispatcher` ثبت می‌شن:
+```cpp
+void onCreated   (void(*)(TimerCreatedEvent*));     // TIMER_EVENT_CREATED
+void onExpired   (void(*)(TimerExpiredEvent*));     // TIMER_EVENT_EXPIRED
+void onCancelled (void(*)(TimerCancelledEvent*));   // TIMER_EVENT_CANCELLED
+void onRescheduled(void(*)(TimerRescheduledEvent*));// TIMER_EVENT_RESCHEDULED
+void onTick      (void(*)(TimerTickEvent*));        // TIMER_EVENT_TICK
+```
+ساختار ایونت‌ها (هر کدوم `static constexpr const char* Name` دارن):
+- `TimerCreatedEvent{timer_id, duration_ms, is_interval}`
+- `TimerExpiredEvent{timer_id, scheduled_ms, actual_ms, drift_ms, is_interval}`
+- `TimerCancelledEvent{timer_id, remaining_ms, is_interval}`
+- `TimerRescheduledEvent{timer_id, next_call_ms, interval_ms}`
+- `TimerTickEvent{current_time, active_timeouts, active_intervals}`
+
+### ۱-۸. واحدهای زمان — `Timer/TimerUnits.h`
+```cpp
+constexpr unsigned long seconds(unsigned long s);  // *1000
+constexpr unsigned long minutes(unsigned long m);  // *60000
+constexpr unsigned long hours(unsigned long h);    // *3600000
+constexpr unsigned long days(unsigned long d);     // *86400000 (حداکثر ~۴۹ روز)
+```
+
+### ۱-۹. TimerBuilder (Fluent)
+```cpp
+Timer* t = TimerBuilder()
+    .withTimeSource(myMillis)              // اگه TIMER_EVENTS_ENABLED: .withEventDispatcher(&d)
+    .build();                             // برمی‌گردونه raw `new Timer*` — خودت delete کن!
+```
+
+### ۱-۱۰. انواع مشترک — `Timer/TimerTypes.h`
+- `struct TimerId { uint32_t value; ... }` — id قوی‌تایپ (`getIndex()`, `getGeneration()`). `INVALID_TIMER_ID = {0}`.
+- `enum class TimerState : uint8_t { Inactive=0, Active=1, Paused=2, Processing=3 }`.
+- `using TimerCallback<Sig> = uniuno::FastFunction<Sig>;`
+
+### ۱-۱۱. فلگ‌های کامپایل — `Timer/TimerConfig.h`
+قبل از `#include <Timer.h>` `#define` کن. فعلاً: TIMEOUT, INTERVAL, IMMEDIATE,
+INTERVAL_UNTIL, CLEAR, GROUPS, OPTIMIZATIONS, SORT_STRATEGY_BINARY_INSERT,
+CACHE_TIME, EVENT_EXPIRED فعالن. `ON_LOOP` غیرفعاله.
+پرست‌های ایونت: `TIMER_ENABLE_ALL_EVENTS` / `DEBUG_EVENTS` / `MONITORING_EVENTS`.
+اگه هیچ‌کدوم از TIMEOUT/INTERVAL/IMMEDIATE/INTERVAL_UNTIL فعال نباشه → خطای کامپایل.
+
+### ۱-۱۲. بهینه‌سازی اسمبلی — `Timer/Optimization/TimerAsm.h` (`namespace uniuno::asm_opt`)
+فقط داخلی: `is_timer_expired`, `test_bitmap_bit/set/clear`, `calculate_drift`,
+`optimize_tick_cache`, `fast_process_call<ManagerType>`.
+
+---
+
+## ۲. Events — EventDispatcher (سیستم رویداد)
+
+فایل: `Events/EventDispatcher.h` (alias `using EventDispatcher = EventDispatcherBase<32,8>`؛
+۳۲ ایونت ماکس، ۸ لیسنر ماکس). حافظه ۱۰۰٪ پیش‌تخصیص (بدون heap).
+
+### ۲-۱. تعریف ایونت
+هر ایونت یه struct ساده با `static constexpr const char* Name` هست:
+```cpp
+struct MyEvent {
+  static constexpr const char* Name = "my.event";
+  int value;
+};
+```
+هش نام ایونت توسط `hash_event_name()` (djb2) محاسبه می‌شه — خودکار.
+
+### ۲-۲. ثبت لیسنر (subscribe)
+```cpp
+EventDispatcher d;
+
+// با function pointer:
+d.on<MyEvent>([](MyEvent* e) { Serial.println(e->value); });
+
+// با lambda (اکیده):
+d.on<MyEvent>([](MyEvent* e) { /* ... */ });
+
+// یک‌بار مصرف (بعد از اولین dispatch حذف می‌شه):
+d.once<MyEvent>([](MyEvent* e) { /* ... */ });
+
+// برمی‌گردونه uint32_t subscription id (برای حذف دستی)
+uint32_t id = d.on<MyEvent>([](MyEvent* e) {});
+```
+
+### ۲-۳. فرستادن ایونت (dispatch)
+```cpp
+MyEvent ev{ .value = 42 };
+d.dispatch(ev);   // نوع‌امن؛ اگه callback پرتاب کنه توسط ErrorHandler::safe گرفته می‌شه
+```
+
+### ۲-۴. حذف / شمارش
+```cpp
+d.removeListener<MyEvent>();              // حذف همه‌ی لیسنرهای این ایونت
+d.removeListenerById<MyEvent>(id);       // حذف یکی با id
+size_t n = d.count<MyEvent>();           // تعداد لیسنرهای فعال
+size_t total = d.count();                // کل لیسنرها
+d.clear();                               // پاک کردن همه
+```
+
+### ۲-۵. اینترفیس رشته‌ای (low-level) — برای کدهای قدیمی
+`IEventDispatcher` متدهای رشته‌محور داره:
+`dispatch(void* event, const char* name)`,
+`registerListener(const char* name, void(*)(void*), bool is_once)`,
+`removeListenerById(const char*, uint32_t)`, `removeListener(const char*)`.
+
+### ۲-۶. محدودیت‌ها
+- ۳۲ ایونت ماکس / ۸ لیسنر ماکس (در alias پیش‌فرض). برای تغییر: `EventDispatcherBase<N,M>`.
+- callbackها از نوع `FastFunction<void(void*)>` هستن → محدودیت capture ۶۴ بایت.
+- حذف لیسنر در حین dispatch ایمنه (deferred `mark_for_removal`).
+
+---
+
+## ۳. Error — سیستم مدیریت ارور
+
+فایل: `Core/Error/ErrorHandler.h` (Singleton: `ErrorHandler::getInstance()`).
+حافظه ~۱.۵KB RAM. ویژگی‌ها: history buffer (۱۰ تا)، آمار severity، فیلتر،
+throttle، deduplication، context stack، assert.
+
+### ۳-۱. گزارش ارور
+```cpp
+enum class ErrorSeverity { INFO, WARNING, ERROR, CRITICAL };
+
+ErrorHandler::getInstance().reportError("Context", "msg", ErrorSeverity::ERROR);
+```
+
+### ۳-۲. ثبت callback
+```cpp
+ErrorHandler::getInstance().onError([](const ErrorInfo& info) {
+    Serial.printf("[%s] %s: %s\n", severity, info.context, info.message);
+});
+```
+فقط یک callback (آخری برنده‌ست). `ErrorInfo` فیلدها: `context[32]`, `message[128]`,
+`severity`, `timestamp`, `error_code`, `context_stack[96]`.
+
+### ۳-۳. فیلتر / Throttle / Dedup
+```cpp
+h.setFilter(ErrorSeverity::ERROR);   // فقط ERROR و CRITICAL
+h.disableFilter();
+h.setThrottle("SensorRead", 1000);   // حداکثر ۱ ارور/ثانیه از این context
+h.enableDeduplication(5000);         // نادیده گرفتن تکراری در ۵ ثانیه
+h.disableDeduplication();
+```
+
+### ۳-۴. اجرای ایمن
+```cpp
+ErrorHandler::safe([]() { risky(); }, "Ctx");                       // true/false
+ErrorHandler::safeWithFallback([](){connect();}, [](){offline();}, "Net");
+```
+
+### ۳-۵. Context stack (RAII)
+```cpp
+void f() {
+  ERROR_CONTEXT("MyScope");   // push در ورود، pop در خروج — exception-safe
+}
+// یا دستی:
+ErrorHandler::pushContext("A"); ... ErrorHandler::popContext();
+StaticString<128> stack = ErrorHandler::getContextStack();  // "A > B"
+```
+
+### ۳-۶. آمار / تاریخچه
+```cpp
+h.getTotalErrors(); h.getErrorCount(); h.getWarningCount();
+h.getCriticalCount(); h.getInfoCount();
+h.getFilteredCount(); h.getThrottledCount(); h.getDuplicateCount();
+h.getLastErrorTime();
+h.resetStats();
+const ErrorInfo* hist = h.getErrorHistory(count);
+h.printErrorHistory();   // چاپ به Serial
+```
+
+### ۳-۷. Assert (تست‌ها)
+```cpp
+ERROR_ASSERT(cond, "msg");                 // CRITICAL اگه cond غلط باشه
+ERROR_ASSERT_EQ(expected, actual, "msg");
+h.assertCondition(cond, "ctx", "msg");
+h.assertEqual(exp, act, "ctx", "msg");
+```
+
+### ۳-۸. ErrorQueue (غیر‌بلوکینگ) — `Core/Error/ErrorQueue.h`
+```cpp
+ErrorQueue<16> q;
+q.enqueue("Ctx", "msg", ErrorSeverity::ERROR);  // O(1), non-blocking
+q.processOne();        // پردازش یکی (در loop)
+q.processAll(0);       // همه (0 = نامحدود)
+q.size(); q.capacity(); q.isEmpty(); q.isFull(); q.dropped(); q.clear();
+```
+
+### ۳-۹. ErrorPolicy (Strategy) — `Core/Error/ErrorPolicy.h`
+```cpp
+class IErrorPolicy { virtual bool handle(const ErrorInfo&) = 0; };
+LogOnlyPolicy / RetryPolicy(max) / ThresholdPolicy(n, action) / SeverityPolicy
+// استفاده:
+h.registerPolicy(&myPolicy);   // IErrorPolicy* (از SmallVector نگهداری می‌شه)
+```
+`Error` / `ErrorBase` (`Core/Error/Error.h`): پیچیدن پیام ارور به `const char*`.
+`Error` پیش‌فرض نوع ارور برای Futureها و Deferredهاست.
+
+---
+
+## ۴. Async — Future / Deferred / Executor
+
+فضای نام: `uniuno`. الگو: `Future<Input, Output, Error=Error>`.
+
+### ۴-۱. AsyncResult — `Core/Async/AsyncResult.h`
+```cpp
+enum AsyncState { Pending=0, Resolved, Rejected };
+AsyncResult<T,E> r = AsyncResult<T,E>::resolve(val);
+AsyncResult<T,E> r = AsyncResult<T,E>::reject(err);
+AsyncResult<T,E> r = AsyncResult<T,E>::pending();
+r.is_pending(); r.is_resolved(); r.is_rejected();
+r.get_value();   // T* یا nullptr
+r.get_error();   // E* یا nullptr
+r.get_state();
+```
+تخصص `void` هم داره (`AsyncResult<void,E>`).
+
+### ۴-۲. Future — `Core/Async/Future.h`
+```cpp
+// ساخت:
+Future<I,O,E> f(poll_callback);            // poll_callback: FastFunction<AsyncResult<O,E>(const I&), 64>
+Future<I,O,E>::resolve(O);                 // از قبل resolve‌شده
+Future<I,O,E>::reject(E);                  // از قبل reject‌شده
+
+// poll کردن (غیر‌بلوکینگ — هر بار صدا بزن):
+AsyncResult<O,E> res = f.poll(input);      // یا f.poll() برای void-input
+
+// زنجیره (chaining):
+auto chained = f.and_then([](O o) -> N { return ...; });      // تابع → Future<I,N>
+auto chained = f.and_then(anotherFuture);                     // Future → Future
+
+// عضو عمومی:
+f.result;   // AsyncResult<O,E> (وضعیت فعلی)
+```
+تخصص‌های `Future<void,O,E>`, `Future<I,void,E>`, `Future<void,void,E>` همه موجودن.
+`and_then` هم با lambda هم با Future دیگه کار می‌کنه.
+
+### ۴-۳. Deferred (Promise دستی) — `Core/Async/Deferred.h`
+```cpp
+Deferred<I, O, E> d;
+d.resolve(output);          // از بیرون (ISR / Timer / thread) resolve
+d.reject(error);
+Future<I,O,E> f = d.get_future();   // Future متصل به Deferred
+```
+(Specializations برای `void` input و `void` input/output.)
+
+### ۴-۴. Executor (پال کردن چند Future) — `Core/Async/Executor.h`
+```cpp
+Executor exec;   // = ExecutorBase<32>
+exec.execute(future, input);                 // بدون on_error
+exec.execute(future, input, [](E e){});      // با on_error
+exec.execute(future);                        // void-input
+exec.poll();   // در loop صدا بزن — O(active) با swap-and-pop
+```
+
+### ۴-۵. کمکی‌ها
+```cpp
+// Core/Async/FutureFactory.h
+auto f = create_future([](const I& in) -> AsyncResult<O> { ... });
+//        (امضای تابع رو خودش استنتاج می‌کنه)
+
+// Core/Async/create_wait_future.h
+Future<I,void> wf = create_wait_future<I>(1000);   // بعد ۱ ثانیه resolve
+Future<void,void> wf = create_wait_future(1000);
+
+// Core/Async/create_timeout_future.h
+Future<I,O,E> tf = create_timeout_future(future, 5000);  // بعد ۵s reject
+```
+
+---
+
+## ۵. Optimization — کانتینرهای بهینه
+
+### ۵-۱. SmallVector — `Optimization/SmallVector.h`
+جایگزین `std::vector`. تا `N` عنصر در **stack** (بدون heap)، بعدش heap.
+```cpp
+SmallVector<Listener, 4> v;
+v.push_back(x); v.emplace_back(args...); v.pop_back();
+v.clear(); v.reserve(n); v.insert(pos, val);
+v.erase(idx); v.erase(pos); v.erase(first, last);
+v.size(); v.capacity(); v.empty(); v.full(); v.is_heap();
+v[0]; v.front(); v.back(); v.data();
+for (auto& x : v) { ... }   // iterator داره
+```
+- امضا: `template<typename T, size_t N=4, typename Allocator=std::allocator<T>>`.
+- برای PODها عملیات erase/reserve در `.cpp` (POD) بهینه‌سازی شده (صرفه‌جویی Flash).
+
+### ۵-۲. StaticArray — `Optimization/StaticArray.h`
+آرایه‌ی با سایز ثابت، صفر تخصیص. جایگزین `std::vector` وقتی سایز مشخصه.
+```cpp
+StaticArray<T, MaxSize> a;
+a.push_back(x); a.emplace_back(args...); a.pop_back(); a.clear();
+a.insert(pos, val); a.erase(idx); a.erase(it); a.erase(first, last);
+a.remove(value); a.remove_all(value);
+a.size(); a.capacity(); a.empty(); a.full();
+a[0]; a.at(0); a.front(); a.back(); a.data();
+a.find(value); a.begin(); a.end();
+for (auto& x : a) { ... }
+```
+- `using size_type = uint16_t;` (پس MaxSize ≤ ۶۵۵۳۵).
+
+### ۵-۳. StaticHashMap — `Optimization/StaticHashMap.h`
+جایگزین `std::map` (open addressing + linear probing، zero-Flash).
+```cpp
+StaticHashMap<Key, Value, MaxSize> m;   // MaxSize باید توان ۲ باشه و < 0xFFFF
+m.insert(key, value); m.insert(key, std::move(value));
+Value* v = m.find(key);          // nullptr اگه نباشه
+bool ok = m.contains(key);
+m.erase(key); m.clear();
+Value& v = m[key];               // ایجاد در صورت نبودن
+m.size(); m.capacity(); m.empty(); m.full();
+for (auto& kv : m) { /* kv.key, kv.value */ }   // iterator
+```
+- تخصص **رشته‌ای**: `StaticHashMap<const char*, Value, MaxSize>` (هش djb2،
+  بدون `std::hash`). برای کلیدهای `const char*` استفاده کن.
+
+### ۵-۴. StaticString — `Optimization/StaticString.h`
+جایگزین `std::string` (بدون heap).
+```cpp
+StaticString<64> s("hi");
+s += " world"; s += other; s += '!';
+s.size(); s.capacity(); s.empty(); s.clear();
+s.c_str(); s[0];
+s == "x"; s != "x";   // هم با char* و هم StaticString
+```
+
+### ۵-۵. StaticQueue — `Optimization/StaticQueue.h`
+صف حلقوی (ring buffer)، صفر تخصیص.
+```cpp
+StaticQueue<T, Capacity> q;
+q.push(v); q.push(std::move(v)); q.emplace(args...); q.pop();
+q.front(); q.back(); q.empty(); q.full(); q.size(); q.capacity(); q.clear();
+```
+
+### ۵-۶. AtomicSharedPtr — `Optimization/AtomicSharedPtr.h`
+جایگزین سبک `std::shared_ptr` (بدون بloat libstdc++).
+```cpp
+AtomicSharedPtr<T> p = AtomicSharedPtr<T>::make(args...);  // یا AtomicSharedPtr<T>(val)
+AtomicSharedPtr<T> q = p;        // refcount ++ (atomic, relaxed)
+p.reset();                       // refcount --، آخری حذف می‌کنه
+if (p) { T& v = *p; p->member(); }
+```
+- thread-safe refcount.
+
+### ۵-۷. FastFunction — `Optimization/FastFunction.h`
+جایگزین `std::function` (بدون virtual call، type-erased در storage داخلی).
+```cpp
+FastFunction<void()> f = []() { ... };
+FastFunction<int(int)> g = [](int x) { return x+1; };
+f(); g(5);
+if (f) { ... }          // operator bool
+f.clear();
+```
+- امضا: `template<typename Signature, size_t Capacity=32>`. `Capacity` = بایت‌های
+  capture (گرد شده به max_align). پیش‌فرض ۳۲.
+- توابع کلیدی: سازنده از هر functor، `operator()`, `operator bool`, `clear()`,
+  move/copy. `invoke_impl` در IRAM (ESP32) قرار می‌گیره.
+- **برای Timer/Events callbackها همین نوع استفاده می‌شه** → capture محدود به Capacity.
+
+### ۵-۸. StaticFunction — `Optimization/StaticFunction.h`
+فانکشن‌رپر فوق‌سبک (۸ بایت: ptr + context)، صفر Flash.
+```cpp
+StaticFunction<void(int)> sf = StaticFunction<void(int)>::bind(&myFunctor);
+// یا عضو کلاس:
+auto sf = StaticFunction<void(int)>::bindMember<MyClass, &MyClass::method>(&obj);
+sf(42);
+if (sf) { ... }   sf.reset();
+makeStaticFunction(&freeFunc);
+```
+
+### ۵-۹. SortStrategy — `Optimization/SortStrategy.h`
+استراتژی‌های مرتب‌سازی (برای Timer):
+```cpp
+FullSortStrategy         // O(n log n) — < ۵ تا
+BinaryInsertStrategy     // O(n) insert — ۵ تا ۲۰ (پیش‌فرض Timer)
+InsertionSortStrategy    // O(n) — خیلی کوچک/near-sorted
+HeapSortStrategy         // O(log n) insert — تعداد زیاد
+```
+همه متد `add_sorted(container, item, comp)` رو دارن.
+
+### ۵-۱۰. پایه‌ها (داخلی)
+- `ArrayBase` (`Optimization/ArrayBase.h`) — type-erasure برای SmallVector/StaticArray.
+- `HashMapBase` (`Optimization/HashMapBase.h`) — منطق probing برای StaticHashMap.
+
+---
+
+## ۶. Utilities — ابزارهای کمکی
+
+### ۶-۱. function_traits — `Utilities/function_traits.h`
+(از kennytm، فضای نام `utils`.) استخراج اطلاعات تابع در زمان کامپایل:
+```cpp
+utils::function_traits<F>::arity;             // تعداد آرگومان
+utils::function_traits<F>::result_type;      // نوع بازگشتی
+utils::function_traits<F>::arg<0>::type;     // نوع آرگومان i-ام
+```
+برای lambda/function pointer/member function/std::function کار می‌کنه.
+(Future/Executor از این برای SFINAE استفاده می‌کنن — خودت هم می‌تونی.)
+
+### ۶-۲. logging — `Utilities/logging.h`
+ماکروهای لاگ سطح‌بندی‌شده (به Serial در Arduino):
+```cpp
+#define LOG_LEVEL LOG_LEVEL_INFO   // قبل از include تنظیم کن
+TRACE(msg)   TRACEF(fmt, ...)      // 0
+DEBUG(msg)  DEBUGF(fmt, ...)
+INFO(msg)   INFOF(fmt, ...)
+NOTICE      WARNING    ERROR
+CRITICAL    ALERT      EMERGENCY   (هر کدوم ماکرو + نسخه F)
+```
+هر ماکرو فقط وقتی کامپایل می‌شه که `LOG_LEVEL <= سطح` باشه (بقیه خالی می‌شن).
+
+### ۶-۳. sync_clock — `Utilities/sync_clock.h`
+```cpp
+Future<void, time_t> sync_clock(WiFiConnector* connector, unsigned long timeout_ms = 60000);
+```
+ترکیب `connect()` + `configTime` (NTP) + صبر روی زمان معتبر. (نیاز به WiFiConnector و time.h.)
+
+---
+
+## ۷. CompilerTraits — ماکروهای بهینه‌سازی (`Optimization/CompilerTraits.h`)
+
+فضای نام `uniuno`. این ماکروها در تمام کتابخونه‌ها استفاده می‌شن — خودت هم استفاده کن:
+```cpp
+LIKELY(x)     / UNLIKELY(x)     // branch prediction
+HOT_PATH                         // (خالی؛ فقط نشانه‌گر خوانایی)
+FORCE_INLINE                    // __attribute__((always_inline)) inline
+UNROLL_LOOP(n)                  // باز کردن حلقه
+MEMORY_BARRIER()                // 'memw' روی Xtensa / دیواره حافظه
+CPU_NOP()                       // nop
+```
+
+---
+
+## ۸. نکات طلایی برای استفاده (محدودیت‌ها / تله‌ها)
+
+1. **Timer:** `tick()` رو حتماً هر `loop()` صدا بزن مگر اینکه `startHardwareTimer()` زدی.
+   پول ۳۲ تایمر (alias `Timer` ثابته؛ برای تغییر `TimerBase<N>` بساز).
+2. **capture حد:** FastFunction/StaticFunction حدود ۳۲–۶۴ بایت capture دارن →
+   برای state بزرگ از `[&]` استفاده کن.
+3. **TimerFeatures ظاهریه** — فعال‌سازی واقعی در `TimerConfig.h` است.
+4. **TimerBuilder::build()** یه `new` برمی‌گردونه — خودت `delete` کن.
+5. **دو سیستم گروه تایمر** داریم: built-in (`Timer::createGroup`) و `TimerGroup`
+   ایستا (جدا) — قاطی‌شون نکن.
+6. **StaticHashMap:** `MaxSize` باید توان ۲ باشه. برای کلید رشته‌ای از تخصص
+   `StaticHashMap<const char*, V, N>` استفاده کن.
+7. **EventDispatcher:** ۳۲ ایونت / ۸ لیسنر ماکس (در alias پیش‌فرض).
+8. **ErrorHandler:** فقط یک `onError` callback (آخری برنده). Singletonه.
+9. **هیچ‌کدوم از APIهای دیفالت اسمش عوض نشده** — می‌تونی مستقیم در پروژه استفاده کنی.
+10. تمام کانتینرها **صفر heap** برای سایزهای کوچک → برای ESP32 ایده‌آل.
+
+---
+
+## ۹. نحوه‌ی صحیح استفاده (از گیرهای پروژه‌ی Optimal-Wifi)
+
+### ۹-۱. نام متدهای Timer — حتماً با T بزرگ
+```cpp
+Timer timer(features);
+timer.setTimeout(cb, ms);        // نه set_timeout
+timer.setInterval(cb, ms);       // نه set_interval
+timer.setImmediate(cb);
+timer.setInterval_until(cb, ms);
+TimerHandle h = timer.setTimeout(cb, ms);  // برمی‌گردونه TimerHandle (نه TimerId)
+h.cancel();                      // کنسل با handle
+timer.clear_timeout(h.getId());  // یا با TimerId خام
+```
+
+### ۹-۲. EventDispatcher و Timer eventها — فقط function pointer (بدون capture)
+```cpp
+// ❌ اشتباه: لامبدای captureدار قبول نمیشه
+d.on<PingEvent>([&cnt](PingEvent* e){ cnt++; });   // خطای کامپایل
+
+// ✅ درست: state رو file-scope بذار + free function بده
+static volatile int g_cnt = 0;
+static void on_ping(PingEvent* e) { g_cnt++; }      // e->value در دسترسه
+d.on<PingEvent>(on_ping);
+d.once<DoneEvent>(on_done_once);                    // once هم همین‌طوریه
+timer.onExpired(on_timer_expired);                  // void(*)(TimerExpiredEvent*) فقط
+```
+
