@@ -172,22 +172,22 @@ wl_status_t WiFiSTAClass::begin(const char* wpa2_ssid, wpa2_auth_method_t method
         return WL_CONNECT_FAILED;
     }
 
-    if(!wpa2_ssid || *wpa2_ssid == 0x00 || strlen(wpa2_ssid) > 32) {
+    if(!wpa2_ssid || *wpa2_ssid == 0x00 || strnlen(wpa2_ssid, 33) > 32) {
         log_e("SSID too long or missing!");
         return WL_CONNECT_FAILED;
     }
 
-    if(wpa2_identity && strlen(wpa2_identity) > 64) {
+    if(wpa2_identity && strnlen(wpa2_identity, 65) > 64) {
         log_e("identity too long!");
         return WL_CONNECT_FAILED;
     }
 
-    if(wpa2_username && strlen(wpa2_username) > 64) {
+    if(wpa2_username && strnlen(wpa2_username, 65) > 64) {
         log_e("username too long!");
         return WL_CONNECT_FAILED;
     }
 
-    if(wpa2_password && strlen(wpa2_password) > 64) {
+    if(wpa2_password && strnlen(wpa2_password, 65) > 64) {
         log_e("password too long!");
     }
 
@@ -228,12 +228,12 @@ wl_status_t WiFiSTAClass::begin(const char* ssid, const char *passphrase, int32_
         return WL_CONNECT_FAILED;
     }
 
-    if(!ssid || *ssid == 0x00 || strlen(ssid) > 32) {
+    if(!ssid || *ssid == 0x00 || strnlen(ssid, 33) > 32) {
         log_e("SSID too long or missing!");
         return WL_CONNECT_FAILED;
     }
 
-    if(passphrase && strlen(passphrase) > 64) {
+    if(passphrase && strnlen(passphrase, 65) > 64) {
         log_e("passphrase too long!");
         return WL_CONNECT_FAILED;
     }
@@ -501,7 +501,7 @@ uint8_t WiFiSTAClass::waitForConnectResult(unsigned long timeoutLength)
     }
     unsigned long start = millis();
     while((!status() || status() >= WL_DISCONNECTED) && (millis() - start) < timeoutLength) {
-        delay(100);
+        delay(10); // Fine-grained poll: detects connection up to ~90ms sooner than 100ms granularity
     }
     return status();
 }

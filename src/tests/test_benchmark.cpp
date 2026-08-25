@@ -5,86 +5,21 @@
 #include "freertos/task.h"
 
 // ==============================================================================
-// Benchmark 1: WiFi Scan Duration
-// ==============================================================================
-static void bench_scan_speed() {
-    Serial.println("\n[BENCH 1] WiFi Scan Performance:");
-    WiFi.mode(WIFI_STA);
-    WiFi.disconnect();
-    delay(100);
-
-    // Full 13-Channel Scan
-    uint32_t tStart = millis();
-    int16_t countAll = WiFi.scanNetworks(false, true);
-    uint32_t durAll = millis() - tStart;
-    WiFi.scanDelete();
-
-    Serial.printf("  -> Full Scan (Channels 1-13) : %4u ms (Found %d APs)\n", durAll, countAll);
-
-    // Targeted Single-Channel Scan (Ch 11)
-    tStart = millis();
-    int16_t countCh11 = WiFi.scanNetworks(false, true, false, 200, 11);
-    uint32_t durCh11 = millis() - tStart;
-    WiFi.scanDelete();
-
-    Serial.printf("  -> Single-Channel Scan (Ch 11): %4u ms (Found %d APs)\n", durCh11, countCh11);
-}
-
-// ==============================================================================
-// Benchmark 2: Station Connect & Reconnect Latency
-// ==============================================================================
-static void bench_sta_connection_latency() {
-    Serial.println("\n[BENCH 2] STA Connect / Disconnect Latency:");
-
-    if (strcmp(TEST_WIFI_SSID, "YOUR_WIFI_SSID") == 0) {
-        Serial.println("  -> [SKIP] WiFi credentials not set.");
-        return;
-    }
-
-    WiFi.config(IPAddress(), IPAddress(), IPAddress());
-    WiFi.mode(WIFI_STA);
-    WiFi.disconnect(false, false);
-    delay(200);
-
-    // 1. Initial Connection Time
-    uint32_t tStart = millis();
-    WiFi.begin(TEST_WIFI_SSID, TEST_WIFI_PASS);
-    uint8_t res = WiFi.waitForConnectResult(TEST_WIFI_TIMEOUT);
-    uint32_t durConnect = millis() - tStart;
-
-    if (res == WL_CONNECTED) {
-        Serial.printf("  -> Fresh Connection Time : %4u ms (IP: %s)\n",
-                      durConnect, WiFi.localIP().toString().c_str());
-
-        // 2. Disconnect Time
-        tStart = micros();
-        WiFi.disconnect(false, false);
-        uint32_t durDisc = micros() - tStart;
-        Serial.printf("  -> Disconnect Execution  : %4u us\n", durDisc);
-
-        // 3. Reconnect Time
-        delay(200);
-        tStart = millis();
-        WiFi.reconnect();
-        WiFi.waitForConnectResult(TEST_WIFI_TIMEOUT);
-        uint32_t durRecon = millis() - tStart;
-        Serial.printf("  -> Reconnection Time     : %4u ms\n", durRecon);
-    } else {
-        Serial.printf("  -> [FAIL] Connect failed with code: %u\n", res);
-    }
-}
-
-// ==============================================================================
 // Benchmark 3: TCP Throughput & Roundtrip Latency
 // ==============================================================================
 static void bench_tcp_performance() {
     Serial.println("\n[BENCH 3] TCP Socket Throughput & Latency:");
 
-    // Clean wireless stack reset to avoid "netstack cb reg failed" from prior AP/socket tests
+    // Fully settle the wireless stack: stop STA, then wait long enough for the
+    // LWIP/event queue to drain before switching modes. Without this, a pending
+    // STA reconnect event races the AP-mode switch and triggers xQueueGenericSend
+    // asserts (pvItemToQueue == NULL).
+    WiFi.disconnect(false, false);
+    delay(500);
     WiFi.mode(WIFI_OFF);
-    delay(200);
+    delay(1000);
     WiFi.mode(WIFI_AP);
-    delay(200);
+    delay(500);
     WiFi.softAP("ESP32_Bench_AP", "12345678");
     delay(500);
 
@@ -189,7 +124,8 @@ static void bench_tcp_performance() {
             delay(1);
         }
         g_srvDone = true;
-        vTaskDelete(NULL);
+        // Do NOT self-delete here: the parent deletes the task by handle after
+        // draining. Self-deleting AND deleting-by-handle double-frees -> crash.
     };
 
     TaskHandle_t srvHandle = NULL;
@@ -296,46 +232,12 @@ static void bench_udp_performance() {
                   pps, kbPerSec);
 }
 
-// ==============================================================================
-// Benchmark 1b: WiFi Scan Speed (fast single-channel + BSSIDstr latency)
-// ==============================================================================
-static void bench_scan_speed_fast() {
-    Serial.println("\n[BENCH 1b] WiFi Scan Speed (Optimized):");
-    WiFi.mode(WIFI_STA);
-    WiFi.disconnect();
-    delay(100);
-
-    uint32_t tStart = micros();
-    int16_t countCh11 = WiFi.scanNetworks(false, true, false, 200, 11);
-    uint32_t durCh11 = micros() - tStart;
-    WiFi.scanDelete();
-
-    Serial.printf("  -> Single-Channel Scan (Ch 11): %4u us (Found %d APs)\n",
-                  durCh11, countCh11);
-
-    // BSSIDstr() latency over first few APs (no heap, static buffer)
-    if (countCh11 > 0) {
-        int samples = (countCh11 > 10) ? 10 : countCh11;
-        uint32_t tB = micros();
-        for (int i = 0; i < samples; ++i) {
-            String s = WiFi.BSSIDstr(i);
-        }
-        uint32_t durB = micros() - tB;
-        Serial.printf("  -> BSSIDstr() x %d calls : %4u us (%.1f us avg)\n",
-                      samples, durB, (float)durB / samples);
-        WiFi.scanDelete();
-    }
-}
-
 void run_all_benchmarks() {
     Serial.println();
     Serial.println("##################################################");
     Serial.println("#         BASELINE PERFORMANCE BENCHMARKS        #");
     Serial.println("##################################################");
 
-    bench_scan_speed();
-    bench_scan_speed_fast();
-    bench_sta_connection_latency();
     bench_tcp_performance();
     bench_udp_performance();
 
