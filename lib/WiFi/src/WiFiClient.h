@@ -43,6 +43,7 @@ protected:
     std::shared_ptr<WiFiClientRxBuffer> _rxBuffer;
     bool _connected;
     int _timeout;
+    uint32_t _lastConnCheck;   // throttle window for connected() socket probe
 
 public:
     WiFiClient *next;
