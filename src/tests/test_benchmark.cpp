@@ -97,17 +97,22 @@ static void bench_tcp_performance() {
     static volatile uint32_t g_srvSent = 0;   // bytes the server pushed to the client
     static volatile uint32_t g_srvRecv = 0;   // bytes the server absorbed from the client
     static volatile bool g_srvDone = false;
+    static volatile bool g_srvStop = false;
 
     g_srvClient = &serverClient;
     g_srvSent = 0;
     g_srvRecv = 0;
     g_srvDone = false;
+    g_srvStop = false;
 
     auto srvTask = +[](void* param) {
         (void)param;
         uint8_t localBuf[512];
         memset(localBuf, 0xAA, sizeof(localBuf));
-        while (g_srvSent < HALF_BYTES || g_srvRecv < HALF_BYTES) {
+        // Cooperative shutdown: exit when asked OR targets met. The parent must
+        // NEVER force-delete this task — killing it mid-lwip-call corrupts the
+        // socket heap (flaky LoadProhibited / xQueueGenericSend asserts).
+        while (!g_srvStop && (g_srvSent < HALF_BYTES || g_srvRecv < HALF_BYTES)) {
             if (g_srvClient && *g_srvClient) {
                 // Server -> Client
                 if (g_srvSent < HALF_BYTES) {
@@ -124,12 +129,10 @@ static void bench_tcp_performance() {
             delay(1);
         }
         g_srvDone = true;
-        // Do NOT self-delete here: the parent deletes the task by handle after
-        // draining. Self-deleting AND deleting-by-handle double-frees -> crash.
+        vTaskDelete(NULL); // self-delete as the very last action (safe: not blocked)
     };
 
-    TaskHandle_t srvHandle = NULL;
-    xTaskCreate(srvTask, "tcp_srv", 4096, NULL, 5, &srvHandle);
+    xTaskCreate(srvTask, "tcp_srv", 4096, NULL, 5, NULL);
 
     uint8_t *bulkBuf = (uint8_t *)malloc(CHUNK_SIZE);
     memset(bulkBuf, 0x55, CHUNK_SIZE);
@@ -154,13 +157,21 @@ static void bench_tcp_performance() {
         yield();
     }
     uint32_t drainWait = millis();
-    while (!g_srvDone && (millis() - drainWait < 3000)) {
+    while ((millis() - drainWait) < 3000) {
+        if (g_srvDone) break;
+        // Ask the server task to stop once the client side has finished its window.
+        if ((cliSent >= HALF_BYTES && cliRecv >= HALF_BYTES) || (millis() - overallStart >= 8000)) {
+            g_srvStop = true;
+        }
+        delay(5);
+    }
+    // Give the cooperative task one final moment to observe g_srvStop and exit.
+    g_srvStop = true;
+    for (int i = 0; i < 100 && !g_srvDone; ++i) {
         delay(5);
     }
     uint32_t totalBulkUs = micros() - tStart;
     free(bulkBuf);
-
-    if (srvHandle) vTaskDelete(srvHandle);
 
     uint32_t totalSent = cliSent + g_srvSent;
     uint32_t totalRecv = cliRecv + g_srvRecv;
