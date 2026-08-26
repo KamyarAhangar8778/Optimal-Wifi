@@ -63,7 +63,15 @@ private:
 
     bool fillBuffer()
     {
-        if(WIFI_CLIENT_RX_BUFFER_SIZE <= _fill || !r_available()) {
+        if(_pos == _fill) {
+            // Buffer fully drained: rewind to regains full capacity. Without
+            // this the buffer saturates permanently once _fill reaches SIZE
+            // and read() returns 0 forever (stall after ~8 KB cumulative).
+            _pos = _fill = 0;
+        } else if(WIFI_CLIENT_RX_BUFFER_SIZE <= _fill) {
+            return false;   // genuinely full with UNREAD data
+        }
+        if(!r_available()) {
             return false;
         }
         int res = recv(_fd, _buffer + _fill, WIFI_CLIENT_RX_BUFFER_SIZE - _fill, MSG_DONTWAIT);
@@ -106,6 +114,7 @@ public:
                 memcpy(dst, _buffer + _pos, len);
             }
             _pos += len;
+            if(_pos == _fill){ _pos = _fill = 0; }  // drained -> rewind
             return len;
         }
 
@@ -122,11 +131,12 @@ public:
             _pos += chunk;
             a += chunk;
         }
+        if(_pos == _fill){ _pos = _fill = 0; }  // drained -> rewind
         return a;
     }
 
     int peek(){
-        if(_pos == _fill && !r_available()){
+        if(_pos == _fill && !fillBuffer()){
             return -1;
         }
         return _buffer[_pos];
@@ -142,13 +152,15 @@ public:
     }
 
     void flush(){
+        // Discard all buffered AND socket-pending RX data.
+        if(_pos == _fill){ _pos = _fill = 0; }  // drained -> rewind first
         if(r_available()){
             int res = recv(_fd, _buffer + _fill, WIFI_CLIENT_RX_BUFFER_SIZE - _fill, MSG_DONTWAIT);
             if(res > 0){
                 _fill += res;
             }
         }
-        _pos = _fill;
+        _pos = _fill = 0;  // discarded everything -> rewind
     }
 };
 
@@ -387,27 +399,42 @@ size_t WiFiClient::write(const uint8_t *buf, size_t size)
         return 0;
     }
 
+    // Fast path: non-blocking send succeeds instantly when the socket send
+    // buffer has room (the overwhelmingly common case for small/medium writes).
     int res = send(fd(), (void*) buf, size, MSG_DONTWAIT);
     if(res >= 0){
         return res;
     }
 
-    // Send failed immediately - check if recoverable (buffer full / interrupted)
+    // Buffer-full path: bounded select-retry. Wait in 100ms slices (never an
+    // unbounded blocking send) and push data the moment the buffer frees up.
+    // Partial sends are accepted — valid per the Arduino Client contract.
     if(errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR){
-        // Recovery path: quick select with minimal timeout for buffer availability
-        fd_set set;
-        struct timeval tv;
-        FD_ZERO(&set);
-        FD_SET(fd(), &set);
-        tv.tv_sec = 0;
-        tv.tv_usec = 50000; // 50ms quick retry window
+        uint32_t waitedMs = 0;
+        while(waitedMs < (uint32_t)_timeout){
+            fd_set wrset;
+            struct timeval slice;
+            FD_ZERO(&wrset);
+            FD_SET(fd(), &wrset);
+            slice.tv_sec = 0;
+            slice.tv_usec = 100000; // 100ms slice
 
-        if(select(fd() + 1, NULL, &set, NULL, &tv) > 0 && FD_ISSET(fd(), &set)){
+            if(select(fd() + 1, NULL, &wrset, NULL, &slice) <= 0){
+                waitedMs += 100;
+                continue;
+            }
+            waitedMs += 100;
+
             res = send(fd(), (void*) buf, size, MSG_DONTWAIT);
-            return (res >= 0) ? res : 0;
+            if(res >= 0){
+                return res;
+            }
+            if(errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR){
+                break; // hard error -> fall through to teardown below
+            }
         }
-        // Buffer still full / temporarily unavailable: return 0 (caller retries).
-        // Do NOT stop() here — partial writes are valid in the Arduino Client contract.
+        // Timed out waiting for buffer space: report short write (0), do NOT
+        // tear down the connection — caller may retry later.
         return 0;
     }
     // Unrecoverable hard error (e.g. connection reset) — tear down the socket.

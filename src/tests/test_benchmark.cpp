@@ -5,6 +5,41 @@
 #include "freertos/task.h"
 
 // ==============================================================================
+// Bulk-transfer harness: dedicated drain task with STRICT socket ownership.
+// On single-chip loopback a single task CANNOT both push (blocking write)
+// and drain the echo: a full send buffer blocks write() while the echo sits
+// unread, which closes the TCP receive window => guaranteed deadlock.
+// Two tasks, each owning exactly ONE socket, is the correct sustained
+// throughput measurement (and mirrors real-world client/server usage).
+// Shutdown is cooperative (flag + self-delete) — never force-delete a task
+// that may sit inside lwip.
+// ==============================================================================
+static WiFiClient* g_bulkSrvCli = nullptr;   // owned ONLY by drain task
+static volatile uint32_t g_bulkEchoBytes = 0;
+static volatile bool g_bulkStop = false;
+static volatile bool g_bulkDrainExited = false;
+static volatile int  g_bulkDrainExit = 0;    // 0=stop flag, 1=null client, 2=disconnected, 3=read<0
+
+static void bulk_drain_task(void*)
+{
+    uint8_t tmp[1460];
+    while (!g_bulkStop) {
+        WiFiClient* c = g_bulkSrvCli;
+        if (!c) { g_bulkDrainExit = 1; break; }
+        if (!c->connected()) { g_bulkDrainExit = 2; break; }
+        int av = c->available();
+        if (av > 0) {
+            int r = c->read(tmp, (size_t)av > sizeof(tmp) ? sizeof(tmp) : (size_t)av);
+            if (r > 0) { g_bulkEchoBytes += (uint32_t)r; continue; }
+            if (r < 0) { g_bulkDrainExit = 3; break; }
+        }
+        vTaskDelay(1);
+    }
+    g_bulkDrainExited = true;
+    vTaskDelete(NULL);
+}
+
+// ==============================================================================
 // Benchmark 3: TCP Throughput & Roundtrip Latency
 // ==============================================================================
 static void bench_tcp_performance() {
@@ -87,104 +122,70 @@ static void bench_tcp_performance() {
     Serial.printf("  -> Roundtrip Latency (Avg): %4.1f us / ping-pong (100 rounds)\n",
                   (float)totalPingUs / PING_COUNT);
 
-    // 3. Bulk Transfer Throughput (64 KB bidirectional: both ends push 32 KB simultaneously)
-    //    On a single-chip loopback, one-way TX saturates the internal bus at ~13 KB; running
-    //    TX+RX in parallel on both ends exercises the full duplex path and avoids that ceiling.
-    const size_t CHUNK_SIZE = 1024;
-    const size_t HALF_BYTES = 32 * 1024; // 32 KB each direction -> 64 KB total
-
-    static WiFiClient* g_srvClient = nullptr;
-    static volatile uint32_t g_srvSent = 0;   // bytes the server pushed to the client
-    static volatile uint32_t g_srvRecv = 0;   // bytes the server absorbed from the client
-    static volatile bool g_srvDone = false;
-    static volatile bool g_srvStop = false;
-
-    g_srvClient = &serverClient;
-    g_srvSent = 0;
-    g_srvRecv = 0;
-    g_srvDone = false;
-    g_srvStop = false;
-
-    auto srvTask = +[](void* param) {
-        (void)param;
-        uint8_t localBuf[512];
-        memset(localBuf, 0xAA, sizeof(localBuf));
-        // Cooperative shutdown: exit when asked OR targets met. The parent must
-        // NEVER force-delete this task — killing it mid-lwip-call corrupts the
-        // socket heap (flaky LoadProhibited / xQueueGenericSend asserts).
-        while (!g_srvStop && (g_srvSent < HALF_BYTES || g_srvRecv < HALF_BYTES)) {
-            if (g_srvClient && *g_srvClient) {
-                // Server -> Client
-                if (g_srvSent < HALF_BYTES) {
-                    int w = g_srvClient->write(localBuf, sizeof(localBuf));
-                    if (w > 0) g_srvSent += w;
-                }
-                // Server absorbs from Client
-                int avail = g_srvClient->available();
-                if (avail > 0) {
-                    size_t toRead = (size_t)avail > sizeof(localBuf) ? sizeof(localBuf) : (size_t)avail;
-                    g_srvRecv += g_srvClient->read(localBuf, toRead);
-                }
-            }
-            delay(1);
-        }
-        g_srvDone = true;
-        vTaskDelete(NULL); // self-delete as the very last action (safe: not blocked)
-    };
-
-    xTaskCreate(srvTask, "tcp_srv", 4096, NULL, 5, NULL);
+    // 3. Bulk Transfer Throughput — DUAL-TASK: sender task pushes into the
+    //    client socket while a dedicated drain task reads the server's echo.
+    //    Strict one-socket-per-task ownership avoids the lwip cross-task
+    //    deadlock and measures true sustained loopback throughput.
+    const size_t CHUNK_SIZE = 1460;          // ~MSS-sized writes
+    const size_t PAYLOAD_BYTES = 64 * 1024;  // 64 KB per round
+    const int BULK_ROUNDS = 3;
 
     uint8_t *bulkBuf = (uint8_t *)malloc(CHUNK_SIZE);
     memset(bulkBuf, 0x55, CHUNK_SIZE);
 
-    tStart = micros();
-    size_t cliSent = 0;   // client -> server
-    size_t cliRecv = 0;   // client <- server
-    uint32_t overallStart = millis();
+    Serial.println("  -> Bulk Transfer (dual-task TX + dedicated RX drain, x3):");
 
-    while ((cliSent < HALF_BYTES || cliRecv < HALF_BYTES) && (millis() - overallStart < 8000)) {
-        // Client -> Server
-        if (cliSent < HALF_BYTES) {
+    g_bulkSrvCli = &serverClient;
+
+    for (int round = 1; round <= BULK_ROUNDS; ++round) {
+        g_bulkEchoBytes = 0;
+        g_bulkStop = false;
+        g_bulkDrainExited = false;
+
+        TaskHandle_t drainHandle = nullptr;
+        if (xTaskCreate(bulk_drain_task, "bulkdrain", 4096, nullptr,
+                        configMAX_PRIORITIES - 2, &drainHandle) != pdPASS) {
+            Serial.println("     [FAIL] could not spawn drain task");
+            break;
+        }
+
+        tStart = micros();
+        size_t sentTotal = 0;
+        uint32_t startMs = millis();
+        uint32_t lastProgressMs = startMs;
+        const char* endNote = "";
+
+        while (sentTotal < PAYLOAD_BYTES && (millis() - startMs < 10000)) {
             int w = client.write(bulkBuf, CHUNK_SIZE);
-            if (w > 0) cliSent += w;
+            if (w > 0) { sentTotal += (size_t)w; lastProgressMs = millis(); }
+            else if (millis() - lastProgressMs > 1500) {
+                endNote = "  [STALL - aborted]";
+                break;
+            }
         }
-        // Client <- Server
-        int avail = client.available();
-        if (avail > 0) {
-            size_t toRead = (size_t)avail > CHUNK_SIZE ? CHUNK_SIZE : (size_t)avail;
-            cliRecv += client.read(bulkBuf, toRead);
-        }
-        yield();
+        uint32_t totalUs = micros() - tStart;
+
+        // Graceful stop: flag first, give the drain task time to exit its
+        // lwip call on its own before we touch anything.
+        g_bulkStop = true;
+        for (int i = 0; i < 200 && !g_bulkDrainExited; ++i) vTaskDelay(1);
+
+        uint32_t echoed = g_bulkEchoBytes;
+        if (!g_bulkDrainExited) endNote = "  [DRAIN TASK HUNG]";
+        else if (sentTotal < PAYLOAD_BYTES) endNote = "  [TIMEOUT]";
+
+        float sec = (float)totalUs / 1000000.0f;
+        float kbPerSec = ((float)sentTotal / 1024.0f) / sec;
+        float mbps = (kbPerSec * 8.0f) / 1024.0f;
+
+        Serial.printf("     Round %d: sent %u B (echo %u B) | %u us | %.2f KB/s (%.2f Mbps)%s\n",
+                      round, (unsigned)sentTotal, (unsigned)echoed,
+                      (unsigned)totalUs, kbPerSec, mbps, endNote);
+
+        vTaskDelay(50);   // let lwip settle between rounds
     }
-    uint32_t drainWait = millis();
-    while ((millis() - drainWait) < 3000) {
-        if (g_srvDone) break;
-        // Ask the server task to stop once the client side has finished its window.
-        if ((cliSent >= HALF_BYTES && cliRecv >= HALF_BYTES) || (millis() - overallStart >= 8000)) {
-            g_srvStop = true;
-        }
-        delay(5);
-    }
-    // Give the cooperative task one final moment to observe g_srvStop and exit.
-    g_srvStop = true;
-    for (int i = 0; i < 100 && !g_srvDone; ++i) {
-        delay(5);
-    }
-    uint32_t totalBulkUs = micros() - tStart;
+
     free(bulkBuf);
-
-    uint32_t totalSent = cliSent + g_srvSent;
-    uint32_t totalRecv = cliRecv + g_srvRecv;
-
-    // Report the realized peak throughput over the measured interval.
-    // On a single-chip loopback the internal bus saturates before 64 KB is moved,
-    // so we measure bytes actually transferred per second (peak rate), not a fixed 64 KB completion.
-    float sec = (float)totalBulkUs / 1000000.0f;
-    float kbPerSec = ((float)totalSent / 1024.0f) / sec;
-    float mbps = (kbPerSec * 8.0f) / 1024.0f;
-
-    Serial.printf("  -> Bulk Transfer (peak)  : %4u us | %u bytes | %.2f KB/s (%.2f Mbps)\n",
-                  totalBulkUs, (unsigned int)totalSent, kbPerSec, mbps);
 
     client.stop();
     serverClient.stop();
