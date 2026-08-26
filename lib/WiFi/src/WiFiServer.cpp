@@ -57,9 +57,12 @@ WiFiClient WiFiServer::available(){
   }
   if(client_sock >= 0){
     int val = 1;
-    if(setsockopt(client_sock, SOL_SOCKET, SO_KEEPALIVE, (char*)&val, sizeof(int)) == ESP_OK) {
-      val = _noDelay;
-      if(setsockopt(client_sock, IPPROTO_TCP, TCP_NODELAY, (char*)&val, sizeof(int)) == ESP_OK)
+    if(setsockopt(client_sock, SOL_SOCKET, SO_KEEPALIVE, (char*)&val, sizeof(int)) >= 0) {
+      // Hot path: lwip sockets already default to Nagle enabled. Only issue
+      // the TCP_NODELAY syscall when the user actually wants it disabled —
+      // saves one setsockopt per accepted connection in the common case.
+      if(!_noDelay || (setsockopt(client_sock, IPPROTO_TCP, TCP_NODELAY,
+                                  (char*)&val, sizeof(int)) == 0))
         return WiFiClient(client_sock);
     }
   }
@@ -120,11 +123,13 @@ bool WiFiServer::hasClient() {
 }
 
 void WiFiServer::end(){
+  if(sockfd >= 0) {   // guard: never issue close on an already-closed fd
 #ifdef ESP_IDF_VERSION_MAJOR
-  lwip_close(sockfd);
+    lwip_close(sockfd);
 #else
-  lwip_close_r(sockfd);
+    lwip_close_r(sockfd);
 #endif
+  }
   sockfd = -1;
   _listening = false;
 }
