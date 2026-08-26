@@ -42,6 +42,7 @@ class WiFiClass : public WiFiGenericClass, public WiFiSTAClass, public WiFiScanC
 {
 private:
     bool prov_enable;
+
 public:
     WiFiClass()
     {
@@ -50,19 +51,20 @@ public:
 
     using WiFiGenericClass::channel;
 
-    using WiFiSTAClass::SSID;
-    using WiFiSTAClass::RSSI;
     using WiFiSTAClass::BSSID;
     using WiFiSTAClass::BSSIDstr;
+    using WiFiSTAClass::RSSI;
+    using WiFiSTAClass::SSID;
 
-    using WiFiScanClass::SSID;
-    using WiFiScanClass::encryptionType;
-    using WiFiScanClass::RSSI;
     using WiFiScanClass::BSSID;
     using WiFiScanClass::BSSIDstr;
     using WiFiScanClass::channel;
-public:  
-    void printDiag(Print& dest);
+    using WiFiScanClass::encryptionType;
+    using WiFiScanClass::RSSI;
+    using WiFiScanClass::SSID;
+
+public:
+    void printDiag(Print &dest);
     friend class WiFiClient;
     friend class WiFiServer;
     friend class WiFiUDP;

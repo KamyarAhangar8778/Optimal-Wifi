@@ -31,6 +31,8 @@ Optimal-Wifi/
 │       │   ├── WiFiAP.h/.cpp          # لایه اکسس‌پوینت (سافت‌AP، کانفیگ Subnet و IP محلی)
 │       │   ├── WiFiScan.h/.cpp        # اسکن همگام/ناهمگام شبکه‌های اطراف و پارس BSSID/RSSI
 │       │   ├── WiFiClient.h/.cpp      # سوکت TCP کلاینت و بافرینگ RX/TX
+│       │   ├── WiFiClientInternal.h   # کلاس‌های داخلی مشترک کلاینت (RX-buffer، Socket-handle)
+│       │   ├── WiFiClientAsync.cpp    # اتصال/ارسال آسنکرون غیربلوکینگ (Poll State-Machine)
 │       │   ├── WiFiServer.h/.cpp      # سرور TCP با قابلیت پذیرش کلاینت‌ها
 │       │   ├── WiFiUdp.h/.cpp         # سوکت ارسال/دریافت بسته‌های بدون اتصال UDP
 │       │   ├── WiFiMulti.h/.cpp       # مدیریت اتصال هوشمند و خودکار به لیست APها
@@ -56,7 +58,8 @@ Optimal-Wifi/
 │       ├── test_scan.cpp/.h           # تست اسکن سنکرون و آسنکرون
 │       ├── test_ap.cpp/.h             # تست چرخه حیات SoftAP و تنظیم IP سفارشی
 │       ├── test_sta.cpp/.h            # تست اتصال به روتر، DHCP، ریکانکت و استاتیک IP
-│       └── test_sockets.cpp/.h        # تست ارتباط دوطرفه TCP Client/Server و پکت UDP
+│       ├── test_sockets.cpp/.h        # تست ارتباط دوطرفه TCP Client/Server و پکت UDP
+│       └── test_async_client.cpp/.h   # تست connect/write آسنکرون + بنچمارک stall در برابر حالت بلوکینگ
 │
 └── platformio.ini                     # تنظیمات کامپایلر، بردهای ESP32 و مسیرهای Include
 ```

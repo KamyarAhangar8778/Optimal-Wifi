@@ -23,73 +23,83 @@
 #undef write
 #undef close
 
-int WiFiServer::setTimeout(uint32_t seconds){
+int WiFiServer::setTimeout(uint32_t seconds)
+{
   struct timeval tv;
   tv.tv_sec = seconds;
   tv.tv_usec = 0;
-  if(setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (char *)&tv, sizeof(struct timeval)) < 0)
+  if (setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (char *)&tv, sizeof(struct timeval)) < 0)
     return -1;
   return setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, (char *)&tv, sizeof(struct timeval));
 }
 
-size_t WiFiServer::write(const uint8_t *data, size_t len){
+size_t WiFiServer::write(const uint8_t *data, size_t len)
+{
   return 0;
 }
 
-void WiFiServer::stopAll(){}
+void WiFiServer::stopAll() {}
 
-WiFiClient WiFiServer::available(){
-  if(!_listening)
+WiFiClient WiFiServer::available()
+{
+  if (!_listening)
     return WiFiClient();
   int client_sock;
-  if (_accepted_sockfd >= 0) {
+  if (_accepted_sockfd >= 0)
+  {
     client_sock = _accepted_sockfd;
     _accepted_sockfd = -1;
   }
-  else {
-  struct sockaddr_in _client;
-  int cs = sizeof(struct sockaddr_in);
+  else
+  {
+    struct sockaddr_in _client;
+    int cs = sizeof(struct sockaddr_in);
 #ifdef ESP_IDF_VERSION_MAJOR
-    client_sock = lwip_accept(sockfd, (struct sockaddr *)&_client, (socklen_t*)&cs);
+    client_sock = lwip_accept(sockfd, (struct sockaddr *)&_client, (socklen_t *)&cs);
 #else
-    client_sock = lwip_accept_r(sockfd, (struct sockaddr *)&_client, (socklen_t*)&cs);
+    client_sock = lwip_accept_r(sockfd, (struct sockaddr *)&_client, (socklen_t *)&cs);
 #endif
   }
-  if(client_sock >= 0){
+  if (client_sock >= 0)
+  {
     int val = 1;
-    if(setsockopt(client_sock, SOL_SOCKET, SO_KEEPALIVE, (char*)&val, sizeof(int)) >= 0) {
+    if (setsockopt(client_sock, SOL_SOCKET, SO_KEEPALIVE, (char *)&val, sizeof(int)) >= 0)
+    {
       // Hot path: lwip sockets already default to Nagle enabled. Only issue
       // the TCP_NODELAY syscall when the user actually wants it disabled —
       // saves one setsockopt per accepted connection in the common case.
-      if(!_noDelay || (setsockopt(client_sock, IPPROTO_TCP, TCP_NODELAY,
-                                  (char*)&val, sizeof(int)) == 0))
+      if (!_noDelay || (setsockopt(client_sock, IPPROTO_TCP, TCP_NODELAY,
+                                   (char *)&val, sizeof(int)) == 0))
         return WiFiClient(client_sock);
     }
   }
   return WiFiClient();
 }
 
-void WiFiServer::begin(uint16_t port){
-    begin(port, 1);
+void WiFiServer::begin(uint16_t port)
+{
+  begin(port, 1);
 }
 
-void WiFiServer::begin(uint16_t port, int enable){
-  if(_listening)
+void WiFiServer::begin(uint16_t port, int enable)
+{
+  if (_listening)
     return;
-  if(port){
-      _port = port;
+  if (port)
+  {
+    _port = port;
   }
   struct sockaddr_in server;
-  sockfd = socket(AF_INET , SOCK_STREAM, 0);
+  sockfd = socket(AF_INET, SOCK_STREAM, 0);
   if (sockfd < 0)
     return;
   setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(int));
   server.sin_family = AF_INET;
   server.sin_addr.s_addr = _addr;
   server.sin_port = htons(_port);
-  if(bind(sockfd, (struct sockaddr *)&server, sizeof(server)) < 0)
+  if (bind(sockfd, (struct sockaddr *)&server, sizeof(server)) < 0)
     return;
-  if(listen(sockfd , _max_clients) < 0)
+  if (listen(sockfd, _max_clients) < 0)
     return;
   fcntl(sockfd, F_SETFL, O_NONBLOCK);
   _listening = true;
@@ -97,33 +107,40 @@ void WiFiServer::begin(uint16_t port, int enable){
   _accepted_sockfd = -1;
 }
 
-void WiFiServer::setNoDelay(bool nodelay) {
-    _noDelay = nodelay;
+void WiFiServer::setNoDelay(bool nodelay)
+{
+  _noDelay = nodelay;
 }
 
-bool WiFiServer::getNoDelay() {
-    return _noDelay;
+bool WiFiServer::getNoDelay()
+{
+  return _noDelay;
 }
 
-bool WiFiServer::hasClient() {
-    if (_accepted_sockfd >= 0) {
-      return true;
-    }
-    struct sockaddr_in _client;
-    int cs = sizeof(struct sockaddr_in);
+bool WiFiServer::hasClient()
+{
+  if (_accepted_sockfd >= 0)
+  {
+    return true;
+  }
+  struct sockaddr_in _client;
+  int cs = sizeof(struct sockaddr_in);
 #ifdef ESP_IDF_VERSION_MAJOR
-    _accepted_sockfd = lwip_accept(sockfd, (struct sockaddr *)&_client, (socklen_t*)&cs);
+  _accepted_sockfd = lwip_accept(sockfd, (struct sockaddr *)&_client, (socklen_t *)&cs);
 #else
-    _accepted_sockfd = lwip_accept_r(sockfd, (struct sockaddr *)&_client, (socklen_t*)&cs);
+  _accepted_sockfd = lwip_accept_r(sockfd, (struct sockaddr *)&_client, (socklen_t *)&cs);
 #endif
-    if (_accepted_sockfd >= 0) {
-      return true;
-    }
-    return false;
+  if (_accepted_sockfd >= 0)
+  {
+    return true;
+  }
+  return false;
 }
 
-void WiFiServer::end(){
-  if(sockfd >= 0) {   // guard: never issue close on an already-closed fd
+void WiFiServer::end()
+{
+  if (sockfd >= 0)
+  { // guard: never issue close on an already-closed fd
 #ifdef ESP_IDF_VERSION_MAJOR
     lwip_close(sockfd);
 #else
@@ -134,11 +151,12 @@ void WiFiServer::end(){
   _listening = false;
 }
 
-void WiFiServer::close(){
+void WiFiServer::close()
+{
   end();
 }
 
-void WiFiServer::stop(){
+void WiFiServer::stop()
+{
   end();
 }
-

@@ -14,24 +14,42 @@
 // Shutdown is cooperative (flag + self-delete) — never force-delete a task
 // that may sit inside lwip.
 // ==============================================================================
-static WiFiClient* g_bulkSrvCli = nullptr;   // owned ONLY by drain task
+static WiFiClient *g_bulkSrvCli = nullptr; // owned ONLY by drain task
 static volatile uint32_t g_bulkEchoBytes = 0;
 static volatile bool g_bulkStop = false;
 static volatile bool g_bulkDrainExited = false;
-static volatile int  g_bulkDrainExit = 0;    // 0=stop flag, 1=null client, 2=disconnected, 3=read<0
+static volatile int g_bulkDrainExit = 0; // 0=stop flag, 1=null client, 2=disconnected, 3=read<0
 
-static void bulk_drain_task(void*)
+static void bulk_drain_task(void *)
 {
     uint8_t tmp[1460];
-    while (!g_bulkStop) {
-        WiFiClient* c = g_bulkSrvCli;
-        if (!c) { g_bulkDrainExit = 1; break; }
-        if (!c->connected()) { g_bulkDrainExit = 2; break; }
+    while (!g_bulkStop)
+    {
+        WiFiClient *c = g_bulkSrvCli;
+        if (!c)
+        {
+            g_bulkDrainExit = 1;
+            break;
+        }
+        if (!c->connected())
+        {
+            g_bulkDrainExit = 2;
+            break;
+        }
         int av = c->available();
-        if (av > 0) {
+        if (av > 0)
+        {
             int r = c->read(tmp, (size_t)av > sizeof(tmp) ? sizeof(tmp) : (size_t)av);
-            if (r > 0) { g_bulkEchoBytes += (uint32_t)r; continue; }
-            if (r < 0) { g_bulkDrainExit = 3; break; }
+            if (r > 0)
+            {
+                g_bulkEchoBytes += (uint32_t)r;
+                continue;
+            }
+            if (r < 0)
+            {
+                g_bulkDrainExit = 3;
+                break;
+            }
         }
         vTaskDelay(1);
     }
@@ -42,7 +60,8 @@ static void bulk_drain_task(void*)
 // ==============================================================================
 // Benchmark 3: TCP Throughput & Roundtrip Latency
 // ==============================================================================
-static void bench_tcp_performance() {
+static void bench_tcp_performance()
+{
     Serial.println("\n[BENCH 3] TCP Socket Throughput & Latency:");
 
     // Fully settle the wireless stack: stop STA, then wait long enough for the
@@ -68,7 +87,8 @@ static void bench_tcp_performance() {
     // 1. Connection Handshake Latency
     uint32_t tStart = micros();
     WiFiClient client;
-    if (!client.connect(hostIP, port, 2000)) {
+    if (!client.connect(hostIP, port, 2000))
+    {
         Serial.println("  -> [FAIL] TCP Connect failed.");
         server.end();
         return;
@@ -77,11 +97,13 @@ static void bench_tcp_performance() {
 
     WiFiClient serverClient = server.available();
     uint32_t wStart = millis();
-    while (!serverClient && (millis() - wStart < 2000)) {
+    while (!serverClient && (millis() - wStart < 2000))
+    {
         serverClient = server.available();
         delay(5);
     }
-    if (!serverClient) {
+    if (!serverClient)
+    {
         Serial.println("  -> [FAIL] Server accept failed.");
         client.stop();
         server.end();
@@ -99,13 +121,15 @@ static void bench_tcp_performance() {
     uint8_t pongBuf[64] = {0};
 
     uint32_t totalPingUs = 0;
-    for (int i = 0; i < PING_COUNT; ++i) {
+    for (int i = 0; i < PING_COUNT; ++i)
+    {
         uint32_t pStart = micros();
         client.write(pingBuf, sizeof(pingBuf));
         client.flush();
 
         uint32_t pw = millis();
-        while (serverClient.available() < (int)sizeof(pingBuf) && (millis() - pw < 1000)) {
+        while (serverClient.available() < (int)sizeof(pingBuf) && (millis() - pw < 1000))
+        {
             delayMicroseconds(10);
         }
         serverClient.read(pongBuf, sizeof(pongBuf));
@@ -113,7 +137,8 @@ static void bench_tcp_performance() {
         serverClient.flush();
 
         pw = millis();
-        while (client.available() < (int)sizeof(pongBuf) && (millis() - pw < 1000)) {
+        while (client.available() < (int)sizeof(pongBuf) && (millis() - pw < 1000))
+        {
             delayMicroseconds(10);
         }
         client.read(pongBuf, sizeof(pongBuf));
@@ -126,8 +151,8 @@ static void bench_tcp_performance() {
     //    client socket while a dedicated drain task reads the server's echo.
     //    Strict one-socket-per-task ownership avoids the lwip cross-task
     //    deadlock and measures true sustained loopback throughput.
-    const size_t CHUNK_SIZE = 1460;          // ~MSS-sized writes
-    const size_t PAYLOAD_BYTES = 64 * 1024;  // 64 KB per round
+    const size_t CHUNK_SIZE = 1460;         // ~MSS-sized writes
+    const size_t PAYLOAD_BYTES = 64 * 1024; // 64 KB per round
     const int BULK_ROUNDS = 3;
 
     uint8_t *bulkBuf = (uint8_t *)malloc(CHUNK_SIZE);
@@ -137,14 +162,16 @@ static void bench_tcp_performance() {
 
     g_bulkSrvCli = &serverClient;
 
-    for (int round = 1; round <= BULK_ROUNDS; ++round) {
+    for (int round = 1; round <= BULK_ROUNDS; ++round)
+    {
         g_bulkEchoBytes = 0;
         g_bulkStop = false;
         g_bulkDrainExited = false;
 
         TaskHandle_t drainHandle = nullptr;
         if (xTaskCreate(bulk_drain_task, "bulkdrain", 4096, nullptr,
-                        configMAX_PRIORITIES - 2, &drainHandle) != pdPASS) {
+                        configMAX_PRIORITIES - 2, &drainHandle) != pdPASS)
+        {
             Serial.println("     [FAIL] could not spawn drain task");
             break;
         }
@@ -153,12 +180,18 @@ static void bench_tcp_performance() {
         size_t sentTotal = 0;
         uint32_t startMs = millis();
         uint32_t lastProgressMs = startMs;
-        const char* endNote = "";
+        const char *endNote = "";
 
-        while (sentTotal < PAYLOAD_BYTES && (millis() - startMs < 10000)) {
+        while (sentTotal < PAYLOAD_BYTES && (millis() - startMs < 10000))
+        {
             int w = client.write(bulkBuf, CHUNK_SIZE);
-            if (w > 0) { sentTotal += (size_t)w; lastProgressMs = millis(); }
-            else if (millis() - lastProgressMs > 1500) {
+            if (w > 0)
+            {
+                sentTotal += (size_t)w;
+                lastProgressMs = millis();
+            }
+            else if (millis() - lastProgressMs > 1500)
+            {
                 endNote = "  [STALL - aborted]";
                 break;
             }
@@ -168,11 +201,14 @@ static void bench_tcp_performance() {
         // Graceful stop: flag first, give the drain task time to exit its
         // lwip call on its own before we touch anything.
         g_bulkStop = true;
-        for (int i = 0; i < 200 && !g_bulkDrainExited; ++i) vTaskDelay(1);
+        for (int i = 0; i < 200 && !g_bulkDrainExited; ++i)
+            vTaskDelay(1);
 
         uint32_t echoed = g_bulkEchoBytes;
-        if (!g_bulkDrainExited) endNote = "  [DRAIN TASK HUNG]";
-        else if (sentTotal < PAYLOAD_BYTES) endNote = "  [TIMEOUT]";
+        if (!g_bulkDrainExited)
+            endNote = "  [DRAIN TASK HUNG]";
+        else if (sentTotal < PAYLOAD_BYTES)
+            endNote = "  [TIMEOUT]";
 
         float sec = (float)totalUs / 1000000.0f;
         float kbPerSec = ((float)sentTotal / 1024.0f) / sec;
@@ -182,7 +218,7 @@ static void bench_tcp_performance() {
                       round, (unsigned)sentTotal, (unsigned)echoed,
                       (unsigned)totalUs, kbPerSec, mbps, endNote);
 
-        vTaskDelay(50);   // let lwip settle between rounds
+        vTaskDelay(50); // let lwip settle between rounds
     }
 
     free(bulkBuf);
@@ -195,7 +231,8 @@ static void bench_tcp_performance() {
 // ==============================================================================
 // Benchmark 4: UDP Throughput & Latency
 // ==============================================================================
-static void bench_udp_performance() {
+static void bench_udp_performance()
+{
     Serial.println("\n[BENCH 4] UDP Packet Throughput & Latency:");
 
     WiFi.mode(WIFI_AP);
@@ -204,7 +241,8 @@ static void bench_udp_performance() {
     uint16_t udpPort = 9292;
 
     WiFiUDP udp;
-    if (!udp.begin(udpPort)) {
+    if (!udp.begin(udpPort))
+    {
         Serial.println("  -> [FAIL] UDP begin failed.");
         return;
     }
@@ -217,16 +255,19 @@ static void bench_udp_performance() {
     uint32_t tStart = micros();
     int successfulPackets = 0;
 
-    for (int i = 0; i < PACKET_COUNT; ++i) {
+    for (int i = 0; i < PACKET_COUNT; ++i)
+    {
         udp.beginPacket(hostIP, udpPort);
         udp.write(packetData, PACKET_SIZE);
         udp.endPacket();
 
         uint32_t wStart = micros();
-        while (udp.parsePacket() == 0 && (micros() - wStart < 50000)) {
+        while (udp.parsePacket() == 0 && (micros() - wStart < 50000))
+        {
             delayMicroseconds(20);
         }
-        if (udp.available()) {
+        if (udp.available())
+        {
             udp.read(packetData, PACKET_SIZE);
             successfulPackets++;
         }
@@ -244,7 +285,8 @@ static void bench_udp_performance() {
                   pps, kbPerSec);
 }
 
-void run_all_benchmarks() {
+void run_all_benchmarks()
+{
     Serial.println();
     Serial.println("##################################################");
     Serial.println("#         BASELINE PERFORMANCE BENCHMARKS        #");

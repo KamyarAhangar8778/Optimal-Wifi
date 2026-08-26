@@ -5,11 +5,13 @@
 #include "test_ap.h"
 #include "test_sta.h"
 #include "test_sockets.h"
+#include "test_async_client.h"
 #include "test_benchmark.h"
 
 TestStats g_stats;
 
-static void print_banner() {
+static void print_banner()
+{
     Serial.println();
     Serial.println("**************************************************");
     Serial.println("*           OPTIMAL-WIFI TEST SUITE              *");
@@ -22,7 +24,8 @@ static void print_banner() {
     Serial.println("**************************************************");
 }
 
-static void print_summary() {
+static void print_summary()
+{
     Serial.println();
     Serial.println("==================================================");
     Serial.println("                 TEST SUMMARY                     ");
@@ -33,9 +36,12 @@ static void print_summary() {
     Serial.printf("  Skipped Tests: %u\n", g_stats.skippedTests);
     Serial.println("--------------------------------------------------");
 
-    if (g_stats.failedTests == 0) {
+    if (g_stats.failedTests == 0)
+    {
         Serial.println("  >>> RESULT: ALL EXECUTED TESTS PASSED! <<<");
-    } else {
+    }
+    else
+    {
         Serial.println("  >>> RESULT: SOME TESTS FAILED! <<<");
     }
     Serial.println("==================================================");
@@ -45,7 +51,8 @@ static void print_summary() {
     Serial.println("==================================================");
 }
 
-void setup() {
+void setup()
+{
     Serial.begin(115200);
     delay(2000); // Allow Serial monitor to attach
 
@@ -58,6 +65,7 @@ void setup() {
     run_ap_tests();
     run_sta_tests();
     run_socket_tests();
+    run_async_client_tests();
 
     print_summary();
 
@@ -65,8 +73,8 @@ void setup() {
     run_all_benchmarks();
 }
 
-void loop() {
+void loop()
+{
     // Keep idle after tests and benchmarks complete
     delay(1000);
 }
-
