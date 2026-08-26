@@ -20,7 +20,6 @@
 #ifndef _WIFICLIENT_H_
 #define _WIFICLIENT_H_
 
-
 #include "Arduino.h"
 #include "Client.h"
 #include <memory>
@@ -31,9 +30,9 @@ class WiFiClientRxBuffer;
 class ESPLwIPClient : public Client
 {
 public:
-        virtual int connect(IPAddress ip, uint16_t port, int32_t timeout) = 0;
-        virtual int connect(const char *host, uint16_t port, int32_t timeout) = 0;
-        virtual int setTimeout(uint32_t seconds) = 0;
+    virtual int connect(IPAddress ip, uint16_t port, int32_t timeout) = 0;
+    virtual int connect(const char *host, uint16_t port, int32_t timeout) = 0;
+    virtual int setTimeout(uint32_t seconds) = 0;
 };
 
 class WiFiClient : public ESPLwIPClient
@@ -43,7 +42,19 @@ protected:
     std::shared_ptr<WiFiClientRxBuffer> _rxBuffer;
     bool _connected;
     int _timeout;
-    uint32_t _lastConnCheck;   // throttle window for connected() socket probe
+    uint32_t _lastConnCheck; // throttle window for connected() socket probe
+    // Async poll state-machine (see WiFiClientAsync.cpp)
+    uint8_t _asyncConnState;  // 0 = idle, 1 = connecting
+    uint32_t _asyncStartMs;   // connect deadline reference
+    const uint8_t *_wPendBuf; // unsent TX chunk (owned by CALLER, zero-copy)
+    size_t _wPendLen;
+    // Hot-path endpoint cache: TCP endpoints never change mid-connection, so
+    // the no-argument accessors resolve ONCE then serve RAM-only copies.
+    mutable bool _epValid;
+    mutable IPAddress _peerIp;
+    mutable uint16_t _peerPort;
+    mutable IPAddress _locAddr;
+    mutable uint16_t _locPort;
 
 public:
     WiFiClient *next;
@@ -70,7 +81,7 @@ public:
     {
         return connected();
     }
-    WiFiClient & operator=(const WiFiClient &other);
+    WiFiClient &operator=(const WiFiClient &other);
     bool operator==(const bool value)
     {
         return bool() == value;
@@ -79,21 +90,54 @@ public:
     {
         return bool() != value;
     }
-    bool operator==(const WiFiClient&);
-    bool operator!=(const WiFiClient& rhs)
+    bool operator==(const WiFiClient &);
+    bool operator!=(const WiFiClient &rhs)
     {
         return !this->operator==(rhs);
     };
 
     virtual int fd() const;
 
-    int setSocketOption(int option, char* value, size_t len);
-    int setSocketOption(int level, int option, const void* value, size_t len);
+    int setSocketOption(int option, char *value, size_t len);
+    int setSocketOption(int level, int option, const void *value, size_t len);
     int setOption(int option, int *value);
     int getOption(int option, int *value);
     int setTimeout(uint32_t seconds);
     int setNoDelay(bool nodelay);
     bool getNoDelay();
+
+    // ---- Asynchronous API (non-blocking, poll-driven) ----
+    // Start a TCP handshake without stalling loop(). Returns false only on
+    // immediate failure (socket/DNS). Progress it with pollConnect().
+    // NOTE: the host variant resolves DNS synchronously (typically a few ms).
+    bool connectAsync(IPAddress ip, uint16_t port);
+    bool connectAsync(const char *host, uint16_t port);
+    // Pump the async connect. Returns 1 = connected, 0 = still handshaking,
+    // -1 = failed or timed out (deadline = _timeout ms).
+    int pollConnect();
+    bool isConnecting() const
+    {
+        return _asyncConnState != 0;
+    }
+
+    // Queue bytes for transmission WITHOUT ever blocking. Returns bytes
+    // accepted by the kernel right away; the remainder is remembered as a
+    // zero-copy view into the CALLER's buffer — it must stay valid and
+    // unmodified until writeBusy() turns false. Rejects (returns 0) while a
+    // previous chunk is still flushing.
+    size_t writeAsync(const uint8_t *buf, size_t size);
+    // Flush pending TX. Returns 1 = all flushed, 0 = still pending, -1 = error.
+    int pollWrite();
+    size_t pendingWrite() const
+    {
+        return _wPendLen;
+    }
+    bool writeBusy() const
+    {
+        return _wPendLen != 0;
+    }
+
+    void cacheEndpoints() const;
 
     IPAddress remoteIP() const;
     IPAddress remoteIP(int fd) const;
@@ -104,7 +148,7 @@ public:
     uint16_t localPort() const;
     uint16_t localPort(int fd) const;
 
-    //friend class WiFiServer;
+    // friend class WiFiServer;
     using Print::write;
 };
 
