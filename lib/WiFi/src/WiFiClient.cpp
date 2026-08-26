@@ -118,20 +118,20 @@ public:
             return len;
         }
 
-        // Need to read more data to satisfy request
-        size_t toRead = a;
+        // Bulk fast-path: request exceeds buffered data. Copy what we hold,
+        // then recv() the remainder STRAIGHT into the caller's buffer — no
+        // intermediate bounce through the internal buffer (saves one full
+        // copy per large read).
         if(a > 0){
             memcpy(dst, _buffer + _pos, a);
         }
-
-        _pos = _fill;
-        while(len > a && fillBuffer()){
-            size_t chunk = (len - a > (_fill - _pos)) ? (_fill - _pos) : (len - a);
-            memcpy(dst + a, _buffer + _pos, chunk);
-            _pos += chunk;
-            a += chunk;
+        _pos = _fill = 0;   // drained -> rewind
+        ssize_t r = recv(_fd, dst + a, len - a, MSG_DONTWAIT);
+        if(r > 0){
+            a += (size_t)r;
+        } else if(r < 0 && errno != EWOULDBLOCK && errno != EINTR){
+            _failed = true;
         }
-        if(_pos == _fill){ _pos = _fill = 0; }  // drained -> rewind
         return a;
     }
 
