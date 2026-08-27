@@ -19,7 +19,26 @@
 #include "WiFiClient.h"
 #include <lwip/sockets.h>
 
-#define WIFI_CLIENT_RX_BUFFER_SIZE (8192)
+#ifndef UNLIKELY
+#if defined(__GNUC__) || defined(__clang__)
+#define UNLIKELY(x) __builtin_expect(!!(x), 0)
+#define LIKELY(x)   __builtin_expect(!!(x), 1)
+#else
+#define UNLIKELY(x) (x)
+#define LIKELY(x)   (x)
+#endif
+#endif
+
+#ifndef COLD_FUNC
+#if defined(__GNUC__) || defined(__clang__)
+#define COLD_FUNC __attribute__((cold, noinline))
+#else
+#define COLD_FUNC
+#endif
+#endif
+
+static constexpr size_t WIFI_CLIENT_RX_BUFFER_SIZE = 8192;
+static constexpr size_t WIFI_CLIENT_FLUSH_BUFFER_SIZE = 1024; // 1KB saves 3KB of static BSS RAM with <1% stream throughput impact
 
 // Optimized Zero-Allocation receive buffer with larger capacity for throughput
 class WiFiClientRxBuffer
@@ -209,6 +228,35 @@ public:
     int fd()
     {
         return sockfd;
+    }
+};
+
+// RAII ownership of a raw lwIP socket descriptor. Every early-return in a
+// connect flow auto-closes the descriptor; ownership transfers out only via
+// release() on the success path. Makes the error paths leak-proof without
+// hand-written close() calls duplicated at each bail-out site.
+struct FdGuard
+{
+    int fd;
+
+    explicit FdGuard(int f) : fd(f)
+    {
+    }
+    ~FdGuard()
+    {
+        if (fd >= 0)
+        {
+            close(fd);
+        }
+    }
+    FdGuard(const FdGuard &) = delete;
+    FdGuard &operator=(const FdGuard &) = delete;
+
+    int release()
+    {
+        int f = fd;
+        fd = -1;
+        return f;
     }
 };
 

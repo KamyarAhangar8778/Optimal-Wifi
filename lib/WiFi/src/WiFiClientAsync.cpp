@@ -27,17 +27,19 @@
 
 bool WiFiClient::connectAsync(IPAddress ip, uint16_t port)
 {
-    if (_connected || _asyncConnState != 0)
+    if (_connected || _asyncConnState != ConnState::Idle)
     {
         return false; // already connected or connecting
     }
 
-    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd < 0)
+    // RAII: the failure path auto-closes; success releases ownership below.
+    FdGuard g(socket(AF_INET, SOCK_STREAM, 0));
+    if (g.fd < 0)
     {
         log_e("socket: %d", errno);
         return false;
     }
+    int sockfd = g.fd;
     // Non-blocking socket: connect() returns immediately with EINPROGRESS.
     fcntl(sockfd, F_SETFL, fcntl(sockfd, F_GETFL, 0) | O_NONBLOCK);
 
@@ -56,16 +58,15 @@ bool WiFiClient::connectAsync(IPAddress ip, uint16_t port)
     if (res < 0 && errno != EINPROGRESS)
     {
         log_e("async connect on fd %d, errno: %d", sockfd, errno);
-        close(sockfd);
-        return false;
+        return false; // guard closes the descriptor
     }
 
-    clientSocketHandle.reset(new WiFiClientSocketHandle(sockfd));
+    clientSocketHandle.reset(new WiFiClientSocketHandle(g.release())); // ownership transferred
     _rxBuffer.reset(new WiFiClientRxBuffer(sockfd));
     _wPendBuf = NULL; // a stale pending view from a previous session must
     _wPendLen = 0;    // never leak onto the freshly opened socket
     _epValid = false; // endpoints belong to the freshly opened socket
-    _asyncConnState = 1;
+    _asyncConnState = ConnState::Connecting;
     _asyncStartMs = millis();
     return true;
 }
@@ -82,7 +83,7 @@ bool WiFiClient::connectAsync(const char *host, uint16_t port)
 
 int WiFiClient::pollConnect()
 {
-    if (_asyncConnState == 0)
+    if (_asyncConnState == ConnState::Idle)
     {
         // Not mid-handshake: report current state so callers can treat this
         // uniformly with an ongoing connect.
@@ -91,7 +92,7 @@ int WiFiClient::pollConnect()
     if (fd() < 0)
     {
         // Socket vanished mid-handshake (stop() from user code).
-        _asyncConnState = 0;
+        _asyncConnState = ConnState::Idle;
         return -1;
     }
 
@@ -148,7 +149,7 @@ int WiFiClient::pollConnect()
     int flag = 1;
     ROE_ASYNC(setsockopt(fd(), IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag)), "TCP_NODELAY");
 
-    _asyncConnState = 0;
+    _asyncConnState = ConnState::Idle;
     _connected = true;
     return 1;
 }

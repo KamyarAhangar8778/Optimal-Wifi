@@ -38,13 +38,21 @@ public:
 class WiFiClient : public ESPLwIPClient
 {
 protected:
+    // Typed state for the async connect machine (compiles to the same byte
+    // as the old uint8_t flag, but the compiler now rejects bogus values).
+    enum class ConnState : uint8_t
+    {
+        Idle,
+        Connecting
+    };
+
     std::shared_ptr<WiFiClientSocketHandle> clientSocketHandle;
     std::shared_ptr<WiFiClientRxBuffer> _rxBuffer;
     bool _connected;
     int _timeout;
     uint32_t _lastConnCheck; // throttle window for connected() socket probe
     // Async poll state-machine (see WiFiClientAsync.cpp)
-    uint8_t _asyncConnState;  // 0 = idle, 1 = connecting
+    ConnState _asyncConnState;
     uint32_t _asyncStartMs;   // connect deadline reference
     const uint8_t *_wPendBuf; // unsent TX chunk (owned by CALLER, zero-copy)
     size_t _wPendLen;
@@ -56,10 +64,14 @@ protected:
     mutable IPAddress _locAddr;
     mutable uint16_t _locPort;
 
+    void _handleBufferFailure(); // Cold-path error helper
+
 public:
     WiFiClient *next;
     WiFiClient();
     WiFiClient(int fd);
+    WiFiClient(WiFiClient &&rhs);            // transfer socket w/o refcount churn
+    WiFiClient &operator=(WiFiClient &&rhs); // ditto
     ~WiFiClient();
     int connect(IPAddress ip, uint16_t port);
     int connect(IPAddress ip, uint16_t port, int32_t timeout_ms);
@@ -117,7 +129,7 @@ public:
     int pollConnect();
     bool isConnecting() const
     {
-        return _asyncConnState != 0;
+        return _asyncConnState != ConnState::Idle;
     }
 
     // Queue bytes for transmission WITHOUT ever blocking. Returns bytes

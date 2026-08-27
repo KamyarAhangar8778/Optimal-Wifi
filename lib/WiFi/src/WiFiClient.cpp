@@ -27,7 +27,6 @@
 #define WIFI_CLIENT_DEF_CONN_TIMEOUT_MS (3000)
 #define WIFI_CLIENT_MAX_WRITE_RETRY (10)
 #define WIFI_CLIENT_SELECT_TIMEOUT_US (1000000)
-#define WIFI_CLIENT_FLUSH_BUFFER_SIZE (4096)
 #define WIFI_CLIENT_CONN_CHECK_MS (50) // throttle window for connected() probe
 
 #undef connect
@@ -38,20 +37,68 @@
 // so the async implementation (WiFiClientAsync.cpp) can share them without
 // duplication.
 
-WiFiClient::WiFiClient() : _rxBuffer(nullptr), _connected(false), _timeout(WIFI_CLIENT_DEF_CONN_TIMEOUT_MS), next(NULL),
-                           _asyncConnState(0), _asyncStartMs(0), _wPendBuf(NULL), _wPendLen(0),
-                           _epValid(false), _peerIp(), _peerPort(0), _locAddr(), _locPort(0)
+// Delegating constructor: one shared member-init chain, zero duplicated code.
+WiFiClient::WiFiClient()
+    : _rxBuffer(nullptr), _connected(false), _timeout(WIFI_CLIENT_DEF_CONN_TIMEOUT_MS), next(NULL),
+      _asyncConnState(ConnState::Idle), _asyncStartMs(0), _wPendBuf(NULL), _wPendLen(0),
+      _epValid(false), _peerIp(), _peerPort(0), _locAddr(), _locPort(0)
 {
     _lastConnCheck = 0;
 }
 
-WiFiClient::WiFiClient(int fd) : _connected(true), _timeout(WIFI_CLIENT_DEF_CONN_TIMEOUT_MS), next(NULL),
-                                 _asyncConnState(0), _asyncStartMs(0), _wPendBuf(NULL), _wPendLen(0),
-                                 _epValid(false), _peerIp(), _peerPort(0), _locAddr(), _locPort(0)
+WiFiClient::WiFiClient(int fd) : WiFiClient()
 {
     clientSocketHandle.reset(new WiFiClientSocketHandle(fd));
     _rxBuffer.reset(new WiFiClientRxBuffer(fd));
-    _lastConnCheck = 0;
+    _connected = true;
+}
+
+// Move operations: hand over the socket handles without the two atomic
+// refcount round-trips a copy performs. The source is left exactly in the
+// state stop() would leave it (empty, disconnected).
+WiFiClient::WiFiClient(WiFiClient &&rhs)
+    : clientSocketHandle(std::move(rhs.clientSocketHandle)),
+      _rxBuffer(std::move(rhs._rxBuffer)),
+      _connected(rhs._connected), _timeout(rhs._timeout), _lastConnCheck(rhs._lastConnCheck),
+      _asyncConnState(rhs._asyncConnState), _asyncStartMs(rhs._asyncStartMs),
+      _wPendBuf(rhs._wPendBuf), _wPendLen(rhs._wPendLen),
+      _epValid(rhs._epValid), _peerIp(rhs._peerIp), _peerPort(rhs._peerPort),
+      _locAddr(rhs._locAddr), _locPort(rhs._locPort), next(rhs.next)
+{
+    rhs.clientSocketHandle = nullptr;
+    rhs._rxBuffer = nullptr;
+    rhs._connected = false;
+    rhs._asyncConnState = ConnState::Idle;
+    rhs._wPendBuf = NULL;
+    rhs._wPendLen = 0;
+    rhs._epValid = false;
+}
+
+WiFiClient &WiFiClient::operator=(WiFiClient &&rhs)
+{
+    if (this != &rhs)
+    {
+        stop();
+        clientSocketHandle = std::move(rhs.clientSocketHandle);
+        _rxBuffer = std::move(rhs._rxBuffer);
+        _connected = rhs._connected;
+        _timeout = rhs._timeout;
+        _asyncConnState = rhs._asyncConnState;
+        _asyncStartMs = rhs._asyncStartMs;
+        _wPendBuf = rhs._wPendBuf;
+        _wPendLen = rhs._wPendLen;
+        _epValid = false; // endpoints were cached for rhs's socket lifetime;
+                          // this object's fd may differ, so re-resolve lazily
+        next = rhs.next;
+        rhs.clientSocketHandle = nullptr;
+        rhs._rxBuffer = nullptr;
+        rhs._connected = false;
+        rhs._asyncConnState = ConnState::Idle;
+        rhs._wPendBuf = NULL;
+        rhs._wPendLen = 0;
+        rhs._epValid = false;
+    }
+    return *this;
 }
 
 WiFiClient::~WiFiClient()
@@ -75,7 +122,7 @@ WiFiClient &WiFiClient::operator=(const WiFiClient &other)
 
 void WiFiClient::stop()
 {
-    _asyncConnState = 0; // abort any in-flight async connect/print path
+    _asyncConnState = ConnState::Idle; // abort any in-flight async connect path
     _wPendBuf = NULL;
     _wPendLen = 0;
     _epValid = false; // endpoints belong to the closed socket
@@ -91,12 +138,15 @@ int WiFiClient::connect(IPAddress ip, uint16_t port)
 int WiFiClient::connect(IPAddress ip, uint16_t port, int32_t timeout_ms)
 {
     _timeout = timeout_ms;
-    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd < 0)
+    // RAII: any early return below auto-closes the descriptor. Ownership is
+    // handed to the socket handle only on the success path.
+    FdGuard g(socket(AF_INET, SOCK_STREAM, 0));
+    if (g.fd < 0)
     {
         log_e("socket: %d", errno);
         return 0;
     }
+    int sockfd = g.fd;
     fcntl(sockfd, F_SETFL, fcntl(sockfd, F_GETFL, 0) | O_NONBLOCK);
 
     uint32_t ip_addr = ip;
@@ -120,21 +170,18 @@ int WiFiClient::connect(IPAddress ip, uint16_t port, int32_t timeout_ms)
     if (res < 0 && errno != EINPROGRESS)
     {
         log_e("connect on fd %d, errno: %d, \"%s\"", sockfd, errno, strerror(errno));
-        close(sockfd);
-        return 0;
+        return 0; // guard closes the descriptor
     }
 
     res = select(sockfd + 1, nullptr, &fdset, nullptr, _timeout < 0 ? nullptr : &tv);
     if (res < 0)
     {
         log_e("select on fd %d, errno: %d, \"%s\"", sockfd, errno, strerror(errno));
-        close(sockfd);
         return 0;
     }
     else if (res == 0)
     {
         log_i("select returned due to timeout %d ms for fd %d", _timeout, sockfd);
-        close(sockfd);
         return 0;
     }
     else
@@ -146,14 +193,12 @@ int WiFiClient::connect(IPAddress ip, uint16_t port, int32_t timeout_ms)
         if (res < 0)
         {
             log_e("getsockopt on fd %d, errno: %d, \"%s\"", sockfd, errno, strerror(errno));
-            close(sockfd);
-            return 0;
+            return 0; // guard closes the descriptor
         }
 
         if (sockerr != 0)
         {
             log_e("socket error on fd %d, errno: %d, \"%s\"", sockfd, sockerr, strerror(sockerr));
-            close(sockfd);
             return 0;
         }
     }
@@ -177,7 +222,7 @@ int WiFiClient::connect(IPAddress ip, uint16_t port, int32_t timeout_ms)
     ROE_WIFICLIENT(setsockopt(sockfd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag)), "TCP_NODELAY");
 
     fcntl(sockfd, F_SETFL, fcntl(sockfd, F_GETFL, 0) & (~O_NONBLOCK));
-    clientSocketHandle.reset(new WiFiClientSocketHandle(sockfd));
+    clientSocketHandle.reset(new WiFiClientSocketHandle(g.release())); // ownership transferred
     _rxBuffer.reset(new WiFiClientRxBuffer(sockfd));
     _epValid = false; // endpoints of the freshly opened socket are unknown yet
 
@@ -376,16 +421,21 @@ size_t WiFiClient::write(Stream &stream)
     return written;
 }
 
+COLD_FUNC void WiFiClient::_handleBufferFailure()
+{
+    log_e("fail on fd %d, errno: %d, \"%s\"", fd(), errno, strerror(errno));
+    stop();
+}
+
 int WiFiClient::read(uint8_t *buf, size_t size)
 {
     int res = -1;
-    if (_rxBuffer)
+    if (LIKELY(_rxBuffer != nullptr))
     {
         res = _rxBuffer->read(buf, size);
-        if (_rxBuffer->failed())
+        if (UNLIKELY(_rxBuffer->failed()))
         {
-            log_e("fail on fd %d, errno: %d, \"%s\"", fd(), errno, strerror(errno));
-            stop();
+            _handleBufferFailure();
         }
     }
     return res;
@@ -394,13 +444,12 @@ int WiFiClient::read(uint8_t *buf, size_t size)
 int WiFiClient::peek()
 {
     int res = -1;
-    if (_rxBuffer)
+    if (LIKELY(_rxBuffer != nullptr))
     {
         res = _rxBuffer->peek();
-        if (_rxBuffer->failed())
+        if (UNLIKELY(_rxBuffer->failed()))
         {
-            log_e("fail on fd %d, errno: %d, \"%s\"", fd(), errno, strerror(errno));
-            stop();
+            _handleBufferFailure();
         }
     }
     return res;
@@ -408,15 +457,14 @@ int WiFiClient::peek()
 
 int WiFiClient::available()
 {
-    if (!_rxBuffer)
+    if (UNLIKELY(!_rxBuffer))
     {
         return 0;
     }
     int res = _rxBuffer->available();
-    if (_rxBuffer->failed())
+    if (UNLIKELY(_rxBuffer->failed()))
     {
-        log_e("fail on fd %d, errno: %d, \"%s\"", fd(), errno, strerror(errno));
-        stop();
+        _handleBufferFailure();
     }
     return res;
 }
