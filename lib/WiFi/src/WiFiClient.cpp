@@ -37,41 +37,60 @@
 // so the async implementation (WiFiClientAsync.cpp) can share them without
 // duplication.
 
+void EndpointCache::refresh(int fd) const
+{
+    if (valid || fd < 0)
+    {
+        return;
+    }
+    struct sockaddr_storage addr;
+    socklen_t len = sizeof(addr);
+    if (getpeername(fd, (struct sockaddr *)&addr, &len) >= 0)
+    {
+        struct sockaddr_in *s = (struct sockaddr_in *)&addr;
+        peerIp = IPAddress((uint32_t)(s->sin_addr.s_addr));
+        peerPort = ntohs(s->sin_port);
+    }
+    len = sizeof(addr);
+    if (getsockname(fd, (struct sockaddr *)&addr, &len) >= 0)
+    {
+        struct sockaddr_in *s = (struct sockaddr_in *)&addr;
+        localIp = IPAddress((uint32_t)(s->sin_addr.s_addr));
+        localPort = ntohs(s->sin_port);
+    }
+    valid = true;
+}
+
+WiFiClientRxBuffer *WiFiClient::_rx() const
+{
+    return clientSocketHandle ? &clientSocketHandle->rx() : nullptr;
+}
+
 // Delegating constructor: one shared member-init chain, zero duplicated code.
 WiFiClient::WiFiClient()
-    : _rxBuffer(nullptr), _connected(false), _timeout(WIFI_CLIENT_DEF_CONN_TIMEOUT_MS), next(NULL),
-      _asyncConnState(ConnState::Idle), _asyncStartMs(0), _wPendBuf(NULL), _wPendLen(0),
-      _epValid(false), _peerIp(), _peerPort(0), _locAddr(), _locPort(0)
+    : clientSocketHandle(nullptr), _connected(false), _timeout(WIFI_CLIENT_DEF_CONN_TIMEOUT_MS),
+      _lastConnCheck(0), _asyncConnState(ConnState::Idle), _asyncStartMs(0),
+      _txView(), _ep(), next(NULL)
 {
-    _lastConnCheck = 0;
 }
 
 WiFiClient::WiFiClient(int fd) : WiFiClient()
 {
     clientSocketHandle.reset(new WiFiClientSocketHandle(fd));
-    _rxBuffer.reset(new WiFiClientRxBuffer(fd));
     _connected = true;
 }
 
-// Move operations: hand over the socket handles without the two atomic
-// refcount round-trips a copy performs. The source is left exactly in the
-// state stop() would leave it (empty, disconnected).
+// Move operations: hand over the socket handle without atomic refcount churn.
 WiFiClient::WiFiClient(WiFiClient &&rhs)
     : clientSocketHandle(std::move(rhs.clientSocketHandle)),
-      _rxBuffer(std::move(rhs._rxBuffer)),
       _connected(rhs._connected), _timeout(rhs._timeout), _lastConnCheck(rhs._lastConnCheck),
       _asyncConnState(rhs._asyncConnState), _asyncStartMs(rhs._asyncStartMs),
-      _wPendBuf(rhs._wPendBuf), _wPendLen(rhs._wPendLen),
-      _epValid(rhs._epValid), _peerIp(rhs._peerIp), _peerPort(rhs._peerPort),
-      _locAddr(rhs._locAddr), _locPort(rhs._locPort), next(rhs.next)
+      _txView(rhs._txView), _ep(), next(rhs.next)
 {
-    rhs.clientSocketHandle = nullptr;
-    rhs._rxBuffer = nullptr;
     rhs._connected = false;
     rhs._asyncConnState = ConnState::Idle;
-    rhs._wPendBuf = NULL;
-    rhs._wPendLen = 0;
-    rhs._epValid = false;
+    rhs._txView.reset();
+    rhs._ep.invalidate();
 }
 
 WiFiClient &WiFiClient::operator=(WiFiClient &&rhs)
@@ -80,23 +99,19 @@ WiFiClient &WiFiClient::operator=(WiFiClient &&rhs)
     {
         stop();
         clientSocketHandle = std::move(rhs.clientSocketHandle);
-        _rxBuffer = std::move(rhs._rxBuffer);
         _connected = rhs._connected;
         _timeout = rhs._timeout;
+        _lastConnCheck = rhs._lastConnCheck;
         _asyncConnState = rhs._asyncConnState;
         _asyncStartMs = rhs._asyncStartMs;
-        _wPendBuf = rhs._wPendBuf;
-        _wPendLen = rhs._wPendLen;
-        _epValid = false; // endpoints were cached for rhs's socket lifetime;
-                          // this object's fd may differ, so re-resolve lazily
+        _txView = rhs._txView;
+        _ep.invalidate();
         next = rhs.next;
-        rhs.clientSocketHandle = nullptr;
-        rhs._rxBuffer = nullptr;
+
         rhs._connected = false;
         rhs._asyncConnState = ConnState::Idle;
-        rhs._wPendBuf = NULL;
-        rhs._wPendLen = 0;
-        rhs._epValid = false;
+        rhs._txView.reset();
+        rhs._ep.invalidate();
     }
     return *this;
 }
@@ -110,24 +125,23 @@ WiFiClient &WiFiClient::operator=(const WiFiClient &other)
 {
     stop();
     clientSocketHandle = other.clientSocketHandle;
-    _rxBuffer = other._rxBuffer;
     _connected = other._connected;
+    _timeout = other._timeout;
+    _lastConnCheck = other._lastConnCheck;
     _asyncConnState = other._asyncConnState;
     _asyncStartMs = other._asyncStartMs;
-    _wPendBuf = other._wPendBuf;
-    _wPendLen = other._wPendLen;
-    _epValid = false; // never inherit a cache resolved for another socket
+    _txView = other._txView;
+    _ep.invalidate();
+    next = other.next;
     return *this;
 }
 
 void WiFiClient::stop()
 {
-    _asyncConnState = ConnState::Idle; // abort any in-flight async connect path
-    _wPendBuf = NULL;
-    _wPendLen = 0;
-    _epValid = false; // endpoints belong to the closed socket
-    clientSocketHandle = NULL;
-    _rxBuffer = NULL;
+    _asyncConnState = ConnState::Idle;
+    _txView.reset();
+    _ep.invalidate();
+    clientSocketHandle = nullptr;
     _connected = false;
 }
 
@@ -223,11 +237,9 @@ int WiFiClient::connect(IPAddress ip, uint16_t port, int32_t timeout_ms)
 
     fcntl(sockfd, F_SETFL, fcntl(sockfd, F_GETFL, 0) & (~O_NONBLOCK));
     clientSocketHandle.reset(new WiFiClientSocketHandle(g.release())); // ownership transferred
-    _rxBuffer.reset(new WiFiClientRxBuffer(sockfd));
-    _wPendBuf = NULL;
-    _wPendLen = 0;
+    _txView.reset();
     _asyncConnState = ConnState::Idle;
-    _epValid = false; // endpoints of the freshly opened socket are unknown yet
+    _ep.invalidate();
 
     _connected = true;
     return 1;
@@ -433,10 +445,11 @@ COLD_FUNC void WiFiClient::_handleBufferFailure()
 int WiFiClient::read(uint8_t *buf, size_t size)
 {
     int res = -1;
-    if (LIKELY(_rxBuffer != nullptr))
+    WiFiClientRxBuffer *rx = _rx();
+    if (LIKELY(rx != nullptr))
     {
-        res = _rxBuffer->read(buf, size);
-        if (UNLIKELY(_rxBuffer->failed()))
+        res = rx->read(buf, size);
+        if (UNLIKELY(rx->failed()))
         {
             _handleBufferFailure();
         }
@@ -447,10 +460,11 @@ int WiFiClient::read(uint8_t *buf, size_t size)
 int WiFiClient::peek()
 {
     int res = -1;
-    if (LIKELY(_rxBuffer != nullptr))
+    WiFiClientRxBuffer *rx = _rx();
+    if (LIKELY(rx != nullptr))
     {
-        res = _rxBuffer->peek();
-        if (UNLIKELY(_rxBuffer->failed()))
+        res = rx->peek();
+        if (UNLIKELY(rx->failed()))
         {
             _handleBufferFailure();
         }
@@ -460,12 +474,13 @@ int WiFiClient::peek()
 
 int WiFiClient::available()
 {
-    if (UNLIKELY(!_rxBuffer))
+    WiFiClientRxBuffer *rx = _rx();
+    if (UNLIKELY(!rx))
     {
         return 0;
     }
-    int res = _rxBuffer->available();
-    if (UNLIKELY(_rxBuffer->failed()))
+    int res = rx->available();
+    if (UNLIKELY(rx->failed()))
     {
         _handleBufferFailure();
     }
@@ -476,9 +491,10 @@ int WiFiClient::available()
 // seems that in Arduino it also means to clear RX
 void WiFiClient::flush()
 {
-    if (_rxBuffer != nullptr)
+    WiFiClientRxBuffer *rx = _rx();
+    if (rx != nullptr)
     {
-        _rxBuffer->flush();
+        rx->flush();
     }
 }
 
@@ -486,9 +502,8 @@ uint8_t WiFiClient::connected()
 {
     if (_connected)
     {
-        // Hot-path #1: unread buffered data proves the peer is alive and the
-        // socket open — answer from RAM with ZERO syscalls and no millis().
-        if (_rxBuffer && _rxBuffer->hasBuffered())
+        WiFiClientRxBuffer *rx = _rx();
+        if (rx && rx->hasBuffered())
         {
             return 1;
         }
@@ -535,33 +550,9 @@ uint8_t WiFiClient::connected()
     return _connected;
 }
 
-// Resolve both TCP endpoints ONCE per connection; afterwards every no-arg
-// remoteIP/Port/localIP/Port call is a pure RAM read (TCP endpoints are
-// immutable for the life of the connection). The fd-argument variants stay
-// uncached — they exist precisely to query arbitrary sockets.
 void WiFiClient::cacheEndpoints() const
 {
-    if (_epValid || fd() < 0)
-    {
-        return;
-    }
-    struct sockaddr_storage addr;
-    socklen_t len = sizeof addr;
-    if (getpeername(fd(), (struct sockaddr *)&addr, &len) >= 0)
-    {
-        struct sockaddr_in *s = (struct sockaddr_in *)&addr;
-        _peerIp = IPAddress((uint32_t)(s->sin_addr.s_addr));
-        _peerPort = ntohs(s->sin_port);
-    }
-    len = sizeof addr;
-    if (getsockname(fd(), (struct sockaddr *)&addr, &len) >= 0)
-    {
-        struct sockaddr_in *s = (struct sockaddr_in *)&addr;
-        _locAddr = IPAddress((uint32_t)(s->sin_addr.s_addr));
-        _locPort = ntohs(s->sin_port);
-    }
-    _epValid = true; // mark even on failure: retrying a dead socket each call
-                     // would reintroduce exactly the cost we are removing
+    _ep.refresh(fd());
 }
 
 IPAddress WiFiClient::remoteIP(int fd) const
@@ -584,14 +575,14 @@ uint16_t WiFiClient::remotePort(int fd) const
 
 IPAddress WiFiClient::remoteIP() const
 {
-    cacheEndpoints();
-    return _peerIp;
+    _ep.refresh(fd());
+    return _ep.peerIp;
 }
 
 uint16_t WiFiClient::remotePort() const
 {
-    cacheEndpoints();
-    return _peerPort;
+    _ep.refresh(fd());
+    return _ep.peerPort;
 }
 
 IPAddress WiFiClient::localIP(int fd) const
@@ -614,14 +605,14 @@ uint16_t WiFiClient::localPort(int fd) const
 
 IPAddress WiFiClient::localIP() const
 {
-    cacheEndpoints();
-    return _locAddr;
+    _ep.refresh(fd());
+    return _ep.localIp;
 }
 
 uint16_t WiFiClient::localPort() const
 {
-    cacheEndpoints();
-    return _locPort;
+    _ep.refresh(fd());
+    return _ep.localPort;
 }
 
 bool WiFiClient::operator==(const WiFiClient &rhs)

@@ -219,20 +219,29 @@ class WiFiClientSocketHandle
 {
 private:
     int sockfd;
+    WiFiClientRxBuffer _rx;
 
 public:
-    WiFiClientSocketHandle(int fd) : sockfd(fd)
+    explicit WiFiClientSocketHandle(int fd) : sockfd(fd), _rx(fd)
     {
     }
 
     ~WiFiClientSocketHandle()
     {
-        close(sockfd);
+        if (sockfd >= 0)
+        {
+            close(sockfd);
+        }
     }
 
-    int fd()
+    int fd() const
     {
         return sockfd;
+    }
+
+    WiFiClientRxBuffer &rx()
+    {
+        return _rx;
     }
 };
 

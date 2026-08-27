@@ -62,10 +62,8 @@ bool WiFiClient::connectAsync(IPAddress ip, uint16_t port)
     }
 
     clientSocketHandle.reset(new WiFiClientSocketHandle(g.release())); // ownership transferred
-    _rxBuffer.reset(new WiFiClientRxBuffer(sockfd));
-    _wPendBuf = NULL; // a stale pending view from a previous session must
-    _wPendLen = 0;    // never leak onto the freshly opened socket
-    _epValid = false; // endpoints belong to the freshly opened socket
+    _txView.reset();
+    _ep.invalidate();
     _asyncConnState = ConnState::Connecting;
     _asyncStartMs = millis();
     return true;
@@ -175,13 +173,11 @@ size_t WiFiClient::writeAsync(const uint8_t *buf, size_t size)
 
     // Partial send or kernel buffer momentarily full: remember the remainder.
     size_t sent = (res > 0) ? (size_t)res : 0;
-    _wPendBuf = buf + sent;
-    _wPendLen = size - sent;
+    _txView.set(buf + sent, size - sent);
     if (!(res >= 0) && errno != EWOULDBLOCK && errno != EAGAIN && errno != EINTR)
     {
         // Hard error (connection reset etc.) — nothing to retain.
-        _wPendBuf = NULL;
-        _wPendLen = 0;
+        _txView.reset();
         stop();
     }
     return sent;
@@ -193,19 +189,17 @@ int WiFiClient::pollWrite()
     {
         return -1;
     }
-    if (_wPendLen == 0)
+    if (!_txView.isBusy())
     {
         return 1; // nothing pending -> idle/flushed
     }
 
-    int res = send(fd(), (void *)_wPendBuf, _wPendLen, MSG_DONTWAIT);
+    int res = send(fd(), (void *)_txView.data(), _txView.pending(), MSG_DONTWAIT);
     if (res > 0)
     {
-        _wPendBuf += res;
-        _wPendLen -= (size_t)res;
-        if (_wPendLen == 0)
+        _txView.advance((size_t)res);
+        if (!_txView.isBusy())
         {
-            _wPendBuf = NULL;
             return 1; // fully flushed
         }
         return 0; // still draining
@@ -215,8 +209,7 @@ int WiFiClient::pollWrite()
         return 0; // kernel TX buffer still full — retry next iteration
     }
     // Hard error: drop the pending view and tear down.
-    _wPendBuf = NULL;
-    _wPendLen = 0;
+    _txView.reset();
     stop();
     return -1;
 }

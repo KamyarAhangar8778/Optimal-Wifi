@@ -27,6 +27,78 @@
 class WiFiClientSocketHandle;
 class WiFiClientRxBuffer;
 
+struct EndpointCache
+{
+    mutable IPAddress peerIp;
+    mutable IPAddress localIp;
+    mutable uint16_t peerPort;
+    mutable uint16_t localPort;
+    mutable bool valid;
+
+    EndpointCache() : peerIp((uint32_t)0), localIp((uint32_t)0), peerPort(0), localPort(0), valid(false)
+    {
+    }
+
+    void invalidate() const
+    {
+        valid = false;
+    }
+
+    void refresh(int fd) const;
+};
+
+class AsyncTxView
+{
+private:
+    const uint8_t *_buf;
+    size_t _len;
+
+public:
+    AsyncTxView() : _buf(nullptr), _len(0)
+    {
+    }
+
+    bool isBusy() const
+    {
+        return _len != 0;
+    }
+
+    size_t pending() const
+    {
+        return _len;
+    }
+
+    void reset()
+    {
+        _buf = nullptr;
+        _len = 0;
+    }
+
+    void set(const uint8_t *buf, size_t len)
+    {
+        _buf = buf;
+        _len = len;
+    }
+
+    const uint8_t *data() const
+    {
+        return _buf;
+    }
+
+    void advance(size_t n)
+    {
+        if (n >= _len)
+        {
+            reset();
+        }
+        else
+        {
+            _buf += n;
+            _len -= n;
+        }
+    }
+};
+
 class ESPLwIPClient : public Client
 {
 public:
@@ -47,24 +119,17 @@ protected:
     };
 
     std::shared_ptr<WiFiClientSocketHandle> clientSocketHandle;
-    std::shared_ptr<WiFiClientRxBuffer> _rxBuffer;
     bool _connected;
     int _timeout;
     uint32_t _lastConnCheck; // throttle window for connected() socket probe
     // Async poll state-machine (see WiFiClientAsync.cpp)
     ConnState _asyncConnState;
-    uint32_t _asyncStartMs;   // connect deadline reference
-    const uint8_t *_wPendBuf; // unsent TX chunk (owned by CALLER, zero-copy)
-    size_t _wPendLen;
-    // Hot-path endpoint cache: TCP endpoints never change mid-connection, so
-    // the no-argument accessors resolve ONCE then serve RAM-only copies.
-    mutable bool _epValid;
-    mutable IPAddress _peerIp;
-    mutable uint16_t _peerPort;
-    mutable IPAddress _locAddr;
-    mutable uint16_t _locPort;
+    uint32_t _asyncStartMs; // connect deadline reference
+    AsyncTxView _txView;    // zero-copy pending TX view into caller buffer
+    EndpointCache _ep;      // cached TCP endpoints
 
     void _handleBufferFailure(); // Cold-path error helper
+    WiFiClientRxBuffer *_rx() const;
 
 public:
     WiFiClient *next;
@@ -142,11 +207,11 @@ public:
     int pollWrite();
     size_t pendingWrite() const
     {
-        return _wPendLen;
+        return _txView.pending();
     }
     bool writeBusy() const
     {
-        return _wPendLen != 0;
+        return _txView.isBusy();
     }
 
     void cacheEndpoints() const;
