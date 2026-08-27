@@ -25,6 +25,13 @@ WiFiClientSecure	KEYWORD1
 status	KEYWORD2
 mode	KEYWORD2
 connect	KEYWORD2
+connectAsync	KEYWORD2
+pollConnect	KEYWORD2
+isConnecting	KEYWORD2
+writeAsync	KEYWORD2
+pollWrite	KEYWORD2
+writeBusy	KEYWORD2
+pendingWrite	KEYWORD2
 write	KEYWORD2
 available	KEYWORD2
 config	KEYWORD2
@@ -33,6 +40,7 @@ read	KEYWORD2
 flush	KEYWORD2
 stop	KEYWORD2
 connected	KEYWORD2
+cacheEndpoints	KEYWORD2
 begin	KEYWORD2
 beginMulticast	KEYWORD2
 disconnect	KEYWORD2
@@ -52,6 +60,12 @@ parsePacket	KEYWORD2
 destinationIP	KEYWORD2
 remoteIP	KEYWORD2
 remotePort	KEYWORD2
+localPort	KEYWORD2
+setNoDelay	KEYWORD2
+getNoDelay	KEYWORD2
+setOption	KEYWORD2
+getOption	KEYWORD2
+setTimeout	KEYWORD2
 softAP	KEYWORD2
 softAPIP	KEYWORD2
 softAPmacAddress	KEYWORD2
