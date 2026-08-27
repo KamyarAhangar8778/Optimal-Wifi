@@ -119,14 +119,13 @@ protected:
     };
 
     std::shared_ptr<WiFiClientSocketHandle> clientSocketHandle;
-    bool _connected;
-    int _timeout;
-    uint32_t _lastConnCheck; // throttle window for connected() socket probe
-    // Async poll state-machine (see WiFiClientAsync.cpp)
-    ConnState _asyncConnState;
-    uint32_t _asyncStartMs; // connect deadline reference
     AsyncTxView _txView;    // zero-copy pending TX view into caller buffer
     EndpointCache _ep;      // cached TCP endpoints
+    int _timeout;
+    uint32_t _lastConnCheck; // throttle window for connected() socket probe
+    uint32_t _asyncStartMs;  // connect deadline reference
+    ConnState _asyncConnState;
+    bool _connected;
 
     void _handleBufferFailure(); // Cold-path error helper
     WiFiClientRxBuffer *_rx() const;

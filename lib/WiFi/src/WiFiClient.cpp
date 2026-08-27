@@ -419,15 +419,15 @@ size_t WiFiClient::write_P(PGM_P buf, size_t size)
 
 size_t WiFiClient::write(Stream &stream)
 {
-    // Zero-Allocation: use static buffer (align to 4 bytes for optimal DMA)
-    static uint8_t buf[WIFI_CLIENT_FLUSH_BUFFER_SIZE] __attribute__((aligned(4)));
+    // Reentrant stack buffer (512B aligned to 4 bytes): saves 1KB .bss RAM and prevents multithreading data race
+    uint8_t buf[512] __attribute__((aligned(4)));
     size_t written = 0;
     while (true)
     {
         size_t avail = stream.available();
         if (avail == 0)
             break;
-        size_t toRead = (avail > WIFI_CLIENT_FLUSH_BUFFER_SIZE) ? WIFI_CLIENT_FLUSH_BUFFER_SIZE : avail;
+        size_t toRead = (avail > sizeof(buf)) ? sizeof(buf) : avail;
         size_t toWrite = stream.readBytes(buf, toRead);
         if (toWrite == 0)
             break;
@@ -507,23 +507,26 @@ uint8_t WiFiClient::connected()
         {
             return 1;
         }
-        // Throttle the socket probe: a recv() probe per call is wasteful when
-        // connected() is polled every loop iteration. Only re-probe at most once
-        // per WIFI_CLIENT_CONN_CHECK_MS.
+        // Throttle the socket probe: only re-probe at most once per WIFI_CLIENT_CONN_CHECK_MS.
         uint32_t now = millis();
         if ((now - _lastConnCheck) >= WIFI_CLIENT_CONN_CHECK_MS)
         {
             _lastConnCheck = now;
             uint8_t dummy;
-            int res = recv(fd(), &dummy, 0, MSG_DONTWAIT);
-            // avoid unused var warning by gcc
-            (void)res;
-            // recv only sets errno if res is <= 0
-            if (res <= 0)
+            int res = recv(fd(), &dummy, 1, MSG_PEEK | MSG_DONTWAIT);
+            if (res == 0)
+            {
+                // Peer closed connection cleanly (received TCP FIN)
+                _connected = false;
+            }
+            else if (res < 0)
             {
                 switch (errno)
                 {
                 case EWOULDBLOCK:
+#if defined(EAGAIN) && (EAGAIN != EWOULDBLOCK)
+                case EAGAIN:
+#endif
                 case ENOENT: // caused by vfs
                     _connected = true;
                     break;
@@ -532,6 +535,7 @@ uint8_t WiFiClient::connected()
                 case ECONNRESET:
                 case ECONNREFUSED:
                 case ECONNABORTED:
+                case EBADF:
                     _connected = false;
                     log_d("Disconnected: RES: %d, ERR: %d", res, errno);
                     break;
