@@ -67,30 +67,24 @@ private:
             _failed = true;
             return 0;
         }
-        return count;
+        return (count > 0) ? (size_t)count : 0;
     }
 
     bool fillBuffer()
     {
         if (_pos == _fill)
         {
-            // Buffer fully drained: rewind to regains full capacity. Without
-            // this the buffer saturates permanently once _fill reaches SIZE
-            // and read() returns 0 forever (stall after ~8 KB cumulative).
+            // Buffer fully drained: rewind to regain full capacity.
             _pos = _fill = 0;
         }
         else if (WIFI_CLIENT_RX_BUFFER_SIZE <= _fill)
         {
             return false; // genuinely full with UNREAD data
         }
-        if (!r_available())
-        {
-            return false;
-        }
         int res = recv(_fd, _buffer + _fill, WIFI_CLIENT_RX_BUFFER_SIZE - _fill, MSG_DONTWAIT);
         if (res < 0)
         {
-            if (errno != EWOULDBLOCK)
+            if (errno != EWOULDBLOCK && errno != EAGAIN && errno != EINTR)
             {
                 _failed = true;
             }
@@ -124,51 +118,62 @@ public:
 
     int read(uint8_t *dst, size_t len)
     {
-        if (!dst || !len)
+        if (UNLIKELY(!dst || !len))
         {
             return _failed ? -1 : 0;
         }
-        if (_pos == _fill && !r_available())
-            return 0;
 
-        size_t a = _fill - _pos;
-        if (len <= a)
+        if (_pos == _fill)
         {
-            if (len == 1)
+            _pos = _fill = 0;
+
+            if (len >= WIFI_CLIENT_RX_BUFFER_SIZE)
             {
-                *dst = _buffer[_pos];
+                ssize_t r = recv(_fd, dst, len, MSG_DONTWAIT);
+                if (r > 0)
+                {
+                    return (int)r;
+                }
+                if (r < 0 && errno != EWOULDBLOCK && errno != EAGAIN && errno != EINTR)
+                {
+                    _failed = true;
+                }
+                return 0;
+            }
+
+            ssize_t r = recv(_fd, _buffer, WIFI_CLIENT_RX_BUFFER_SIZE, MSG_DONTWAIT);
+            if (r > 0)
+            {
+                _fill = (size_t)r;
             }
             else
             {
-                memcpy(dst, _buffer + _pos, len);
+                if (r < 0 && errno != EWOULDBLOCK && errno != EAGAIN && errno != EINTR)
+                {
+                    _failed = true;
+                }
+                return 0;
             }
-            _pos += len;
-            if (_pos == _fill)
-            {
-                _pos = _fill = 0;
-            } // drained -> rewind
-            return len;
         }
 
-        // Bulk fast-path: request exceeds buffered data. Copy what we hold,
-        // then recv() the remainder STRAIGHT into the caller's buffer — no
-        // intermediate bounce through the internal buffer (saves one full
-        // copy per large read).
-        if (a > 0)
+        size_t availableBytes = _fill - _pos;
+        size_t toCopy = (len < availableBytes) ? len : availableBytes;
+
+        if (toCopy == 1)
         {
-            memcpy(dst, _buffer + _pos, a);
+            *dst = _buffer[_pos];
         }
-        _pos = _fill = 0; // drained -> rewind
-        ssize_t r = recv(_fd, dst + a, len - a, MSG_DONTWAIT);
-        if (r > 0)
+        else
         {
-            a += (size_t)r;
+            memcpy(dst, _buffer + _pos, toCopy);
         }
-        else if (r < 0 && errno != EWOULDBLOCK && errno != EINTR)
+
+        _pos += toCopy;
+        if (_pos == _fill)
         {
-            _failed = true;
+            _pos = _fill = 0;
         }
-        return a;
+        return (int)toCopy;
     }
 
     int peek()

@@ -224,6 +224,9 @@ int WiFiClient::connect(IPAddress ip, uint16_t port, int32_t timeout_ms)
     fcntl(sockfd, F_SETFL, fcntl(sockfd, F_GETFL, 0) & (~O_NONBLOCK));
     clientSocketHandle.reset(new WiFiClientSocketHandle(g.release())); // ownership transferred
     _rxBuffer.reset(new WiFiClientRxBuffer(sockfd));
+    _wPendBuf = NULL;
+    _wPendLen = 0;
+    _asyncConnState = ConnState::Idle;
     _epValid = false; // endpoints of the freshly opened socket are unknown yet
 
     _connected = true;
@@ -332,7 +335,7 @@ int WiFiClient::read()
 
 size_t WiFiClient::write(const uint8_t *buf, size_t size)
 {
-    if (!_connected || (fd() < 0))
+    if (!_connected || (fd() < 0) || !buf || size == 0)
     {
         return 0;
     }
@@ -623,7 +626,7 @@ uint16_t WiFiClient::localPort() const
 
 bool WiFiClient::operator==(const WiFiClient &rhs)
 {
-    return clientSocketHandle == rhs.clientSocketHandle && remotePort() == rhs.remotePort() && remoteIP() == rhs.remoteIP();
+    return clientSocketHandle == rhs.clientSocketHandle;
 }
 
 int WiFiClient::fd() const

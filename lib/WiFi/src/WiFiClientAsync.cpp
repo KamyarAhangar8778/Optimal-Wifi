@@ -162,7 +162,7 @@ int WiFiClient::pollConnect()
 
 size_t WiFiClient::writeAsync(const uint8_t *buf, size_t size)
 {
-    if (!_connected || fd() < 0 || writeBusy())
+    if (!_connected || fd() < 0 || writeBusy() || !buf || size == 0)
     {
         return 0;
     }
