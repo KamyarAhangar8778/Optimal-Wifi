@@ -43,6 +43,12 @@ bool WiFiClient::connectAsync(IPAddress ip, uint16_t port)
     // Non-blocking socket: connect() returns immediately with EINPROGRESS.
     fcntl(sockfd, F_SETFL, fcntl(sockfd, F_GETFL, 0) | O_NONBLOCK);
 
+    // Tune buffers BEFORE the handshake (same reason as blocking connect()).
+    if (_configureSocket(sockfd, _timeout) < 0)
+    {
+        return false;
+    }
+
     uint32_t ip_addr = ip;
     struct sockaddr_in serveraddr = {};
     serveraddr.sin_family = AF_INET;
@@ -121,13 +127,6 @@ int WiFiClient::pollConnect()
     if (res < 0 || sockerr != 0)
     {
         log_e("async connect failed on fd %d, errno: %d", fd(), sockerr ? sockerr : errno);
-        stop();
-        return -1;
-    }
-
-    // Handshake done — apply the same tuning as the blocking path.
-    if (_configureSocket(fd(), _timeout) < 0)
-    {
         stop();
         return -1;
     }

@@ -29,10 +29,6 @@
 #define WIFI_CLIENT_SELECT_TIMEOUT_US (1000000)
 #define WIFI_CLIENT_CONN_CHECK_MS (50) // throttle window for connected() probe
 
-#undef connect
-#undef write
-#undef read
-
 // WiFiClientRxBuffer and WiFiClientSocketHandle moved to WiFiClientInternal.h
 // so the async implementation (WiFiClientAsync.cpp) can share them without
 // duplication.
@@ -53,8 +49,18 @@
 int WiFiClient::_configureSocket(int fd, int timeout_ms)
 {
     struct timeval tv;
-    tv.tv_sec = timeout_ms / 1000;
-    tv.tv_usec = (timeout_ms % 1000) * 1000;
+    if (timeout_ms < 0)
+    {
+        // Negative timeout = infinite (blocking). lwIP treats a zero timeval
+        // as "no timeout" for SO_RCVTIMEO/SO_SNDTIMEO.
+        tv.tv_sec = 0;
+        tv.tv_usec = 0;
+    }
+    else
+    {
+        tv.tv_sec = timeout_ms / 1000;
+        tv.tv_usec = (timeout_ms % 1000) * 1000;
+    }
 
     int rcvBuf = 8192;
     setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &rcvBuf, sizeof(int)); // Best effort
@@ -75,19 +81,23 @@ void EndpointCache::refresh(int fd) const
     }
     struct sockaddr_storage addr;
     socklen_t len = sizeof(addr);
-    if (getpeername(fd, (struct sockaddr *)&addr, &len) >= 0)
+    if (getpeername(fd, (struct sockaddr *)&addr, &len) < 0)
     {
-        struct sockaddr_in *s = (struct sockaddr_in *)&addr;
-        peerIp = IPAddress((uint32_t)(s->sin_addr.s_addr));
-        peerPort = ntohs(s->sin_port);
+        return; // don't cache a half-populated struct on failure
     }
+    struct sockaddr_in *s = (struct sockaddr_in *)&addr;
+    peerIp = IPAddress((uint32_t)(s->sin_addr.s_addr));
+    peerPort = ntohs(s->sin_port);
+
     len = sizeof(addr);
-    if (getsockname(fd, (struct sockaddr *)&addr, &len) >= 0)
+    if (getsockname(fd, (struct sockaddr *)&addr, &len) < 0)
     {
-        struct sockaddr_in *s = (struct sockaddr_in *)&addr;
-        localIp = IPAddress((uint32_t)(s->sin_addr.s_addr));
-        localPort = ntohs(s->sin_port);
+        return; // same as above — leave valid=false for a later retry
     }
+    s = (struct sockaddr_in *)&addr;
+    localIp = IPAddress((uint32_t)(s->sin_addr.s_addr));
+    localPort = ntohs(s->sin_port);
+
     valid = true;
 }
 
@@ -193,6 +203,13 @@ int WiFiClient::connect(IPAddress ip, uint16_t port, int32_t timeout_ms)
     int sockfd = g.fd;
     fcntl(sockfd, F_SETFL, fcntl(sockfd, F_GETFL, 0) | O_NONBLOCK);
 
+    // Tune buffers BEFORE the handshake so SO_RCVBUF/SO_SNDBUF influence the
+    // TCP window scaling advertised during SYN/SYN-ACK exchange.
+    if (_configureSocket(sockfd, _timeout) < 0)
+    {
+        return 0;
+    }
+
     uint32_t ip_addr = ip;
     struct sockaddr_in serveraddr = {};
     serveraddr.sin_family = AF_INET;
@@ -244,11 +261,6 @@ int WiFiClient::connect(IPAddress ip, uint16_t port, int32_t timeout_ms)
             log_e("socket error on fd %d, errno: %d, \"%s\"", sockfd, sockerr, strerror(sockerr));
             return 0;
         }
-    }
-
-    if (_configureSocket(sockfd, _timeout) < 0)
-    {
-        return 0;
     }
 
     fcntl(sockfd, F_SETFL, fcntl(sockfd, F_GETFL, 0) & (~O_NONBLOCK));
@@ -368,32 +380,45 @@ size_t WiFiClient::write(const uint8_t *buf, size_t size)
         return 0;
     }
 
-    // Fast path: non-blocking send succeeds instantly when the socket send
-    // buffer has room (the overwhelmingly common case for small/medium writes).
-    int res = send(fd(), (void *)buf, size, MSG_DONTWAIT);
-    if (res >= 0)
+    // Loop-to-full: a single send() cannot guarantee delivering `size` bytes
+    // (lwIP may accept only part). Advance the cursor and retry the tail so
+    // no byte is silently dropped — matching the standard Arduino contract.
+    size_t totalSent = 0;
+    while (totalSent < size)
     {
-        return res;
-    }
+        // Fast path: non-blocking send. Full success returns immediately; a
+        // partial success advances the cursor and retries the tail WITHOUT
+        // stalling on select().
+        int res = send(fd(), (void *)(buf + totalSent), size - totalSent, MSG_DONTWAIT);
+        if (res > 0)
+        {
+            totalSent += (size_t)res;
+            continue;
+        }
+        if (res == 0 || (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR))
+        {
+            // send()==0 for a non-zero length means the peer closed with no
+            // data accepted; any other non-retryable errno is a hard error.
+            stop();
+            return totalSent;
+        }
 
-    // Buffer-full path: bounded select-retry. Wait in short slices (never an
-    // unbounded blocking send) and push data the moment the buffer frees up.
-    // The deadline is derived from millis() — NOT from counting assumed slice
-    // durations — so OS timer quantization can never overshoot the budget by
-    // more than a single slice. Partial sends are accepted (Arduino contract).
-    if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
-    {
+        // Buffer-full path: bounded select-retry. Wait in short slices and push
+        // the moment the buffer frees up. The budget is derived from millis()
+        // (NOT a retry count) so timer quantization can't overshoot it.
         uint32_t startMs = millis();
         while (true)
         {
             uint32_t waitedMs = millis() - startMs;
             if (waitedMs >= (uint32_t)_timeout)
             {
-                break; // real-time budget exhausted -> report short write
+                // Budget exhausted: report a short write but KEEP the
+                // connection — the caller may retry later.
+                return totalSent;
             }
             uint32_t remainMs = (uint32_t)_timeout - waitedMs;
-            // Cap the slice at 10ms: bounds worst-case loop stall tightly,
-            // and the final slice shrinks to exactly the remaining budget.
+            // Cap the slice at 10ms: bounds worst-case loop stall tightly, and
+            // the final slice shrinks to exactly the remaining budget.
             suseconds_t sliceUs =
                 (remainMs >= 10) ? 10000 : (suseconds_t)(remainMs * 1000);
 
@@ -406,26 +431,23 @@ size_t WiFiClient::write(const uint8_t *buf, size_t size)
 
             if (select(fd() + 1, NULL, &wrset, NULL, &slice) <= 0)
             {
-                continue; // slice elapsed with no room — deadline re-checked above
+                continue; // no room yet — deadline re-checked above
             }
 
-            res = send(fd(), (void *)buf, size, MSG_DONTWAIT);
-            if (res >= 0)
+            res = send(fd(), (void *)(buf + totalSent), size - totalSent, MSG_DONTWAIT);
+            if (res > 0)
             {
-                return res;
+                totalSent += (size_t)res;
+                break; // back to outer loop for the (possibly empty) tail
             }
             if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)
             {
-                break; // hard error -> fall through to teardown below
+                stop();
+                return totalSent;
             }
         }
-        // Timed out waiting for buffer space: report short write (0), do NOT
-        // tear down the connection — caller may retry later.
-        return 0;
     }
-    // Unrecoverable hard error (e.g. connection reset) — tear down the socket.
-    stop();
-    return 0;
+    return totalSent;
 }
 
 size_t WiFiClient::write_P(PGM_P buf, size_t size)

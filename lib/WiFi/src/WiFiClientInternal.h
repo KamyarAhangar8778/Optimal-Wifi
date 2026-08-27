@@ -115,50 +115,64 @@ public:
             return _failed ? -1 : 0;
         }
 
-        if (_pos == _fill)
+        // 1. Serve already-buffered bytes straight into dst (single memcpy).
+        size_t total = 0;
+        if (_pos != _fill)
         {
-            _pos = _fill = 0;
-
-            if (len >= WIFI_CLIENT_RX_BUFFER_SIZE)
+            size_t avail = _fill - _pos;
+            size_t toCopy = (len < avail) ? len : avail;
+            memcpy(dst, _buffer + _pos, toCopy);
+            _pos += toCopy;
+            total += toCopy;
+            if (_pos == _fill)
             {
-                ssize_t r = recv(_fd, dst, len, MSG_DONTWAIT);
-                if (r > 0)
-                {
-                    return (int)r;
-                }
-                if (r < 0 && errno != EWOULDBLOCK && errno != EAGAIN && errno != EINTR)
-                {
-                    _failed = true;
-                }
-                return 0;
+                _pos = _fill = 0;
             }
+            if (total == len)
+            {
+                return (int)total;
+            }
+            dst += toCopy;
+            len -= toCopy;
+        }
 
-            ssize_t r = recv(_fd, _buffer, WIFI_CLIENT_RX_BUFFER_SIZE, MSG_DONTWAIT);
+        // 2. Buffer drained. For a large remainder, bypass the internal buffer
+        //    and recv() straight into dst — avoids a second memcpy that the old
+        //    path paid on every bulk read. Small remainders still stage through
+        //    the buffer to keep byte/stream reads cheap.
+        if (len >= WIFI_CLIENT_RX_BUFFER_SIZE)
+        {
+            ssize_t r = recv(_fd, dst, len, MSG_DONTWAIT);
             if (r > 0)
             {
-                _fill = (size_t)r;
+                return (int)(total + (size_t)r);
             }
-            else
+            if (r < 0 && errno != EWOULDBLOCK && errno != EAGAIN && errno != EINTR)
             {
-                if (r < 0 && errno != EWOULDBLOCK && errno != EAGAIN && errno != EINTR)
-                {
-                    _failed = true;
-                }
-                return 0;
+                _failed = true;
             }
+            return total ? (int)total : (_failed ? -1 : 0);
         }
 
-        size_t availableBytes = _fill - _pos;
-        size_t toCopy = (len < availableBytes) ? len : availableBytes;
-
-        memcpy(dst, _buffer + _pos, toCopy);
-
-        _pos += toCopy;
-        if (_pos == _fill)
+        ssize_t r = recv(_fd, _buffer, WIFI_CLIENT_RX_BUFFER_SIZE, MSG_DONTWAIT);
+        if (r > 0)
         {
-            _pos = _fill = 0;
+            _fill = (size_t)r;
+            size_t avail = _fill; // _pos == 0 here
+            size_t toCopy = (len < avail) ? len : avail;
+            memcpy(dst, _buffer, toCopy);
+            _pos = toCopy;
+            if (_pos == _fill)
+            {
+                _pos = _fill = 0;
+            }
+            return (int)(total + toCopy);
         }
-        return (int)toCopy;
+        if (r < 0 && errno != EWOULDBLOCK && errno != EAGAIN && errno != EINTR)
+        {
+            _failed = true;
+        }
+        return total ? (int)total : (_failed ? -1 : 0);
     }
 
     FORCE_INLINE int peek()
@@ -183,20 +197,18 @@ public:
 
     void flush()
     {
-        // Discard all buffered AND socket-pending RX data.
-        if (_pos == _fill)
+        // Discard all buffered RX and drain the socket's pending queue too.
+        // Loop is bounded: recv(MSG_DONTWAIT) returns EAGAIN the moment the
+        // kernel RX queue drains, so this cannot spin waiting for new data.
+        _pos = _fill = 0;
+        while (true)
         {
-            _pos = _fill = 0;
-        } // drained -> rewind first
-        if (r_available())
-        {
-            int res = recv(_fd, _buffer + _fill, WIFI_CLIENT_RX_BUFFER_SIZE - _fill, MSG_DONTWAIT);
-            if (res > 0)
+            ssize_t r = recv(_fd, _buffer, WIFI_CLIENT_RX_BUFFER_SIZE, MSG_DONTWAIT);
+            if (r <= 0)
             {
-                _fill += res;
+                break; // 0 = peer closed, -1 = EAGAIN/EWOULDBLOCK/error
             }
         }
-        _pos = _fill = 0; // discarded everything -> rewind
     }
 };
 
