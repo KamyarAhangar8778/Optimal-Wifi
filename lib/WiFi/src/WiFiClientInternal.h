@@ -19,15 +19,7 @@
 #include "WiFiClient.h"
 #include <lwip/sockets.h>
 
-#ifndef UNLIKELY
-#if defined(__GNUC__) || defined(__clang__)
-#define UNLIKELY(x) __builtin_expect(!!(x), 0)
-#define LIKELY(x)   __builtin_expect(!!(x), 1)
-#else
-#define UNLIKELY(x) (x)
-#define LIKELY(x)   (x)
-#endif
-#endif
+#include <Optimization/CompilerTraits.h>
 
 #ifndef COLD_FUNC
 #if defined(__GNUC__) || defined(__clang__)
@@ -50,9 +42,9 @@ private:
     int _fd;
     bool _failed;
 
-    size_t r_available()
+    FORCE_INLINE size_t r_available()
     {
-        if (_fd < 0)
+        if (UNLIKELY(_fd < 0))
         {
             return 0;
         }
@@ -62,7 +54,7 @@ private:
 #else
         int res = lwip_ioctl_r(_fd, FIONREAD, &count);
 #endif
-        if (res < 0)
+        if (UNLIKELY(res < 0))
         {
             _failed = true;
             return 0;
@@ -70,7 +62,7 @@ private:
         return (count > 0) ? (size_t)count : 0;
     }
 
-    bool fillBuffer()
+    FORCE_INLINE bool fillBuffer()
     {
         if (_pos == _fill)
         {
@@ -104,19 +96,19 @@ public:
     {
     }
 
-    bool failed()
+    FORCE_INLINE bool failed()
     {
         return _failed;
     }
 
     // Zero-cost liveness hint: unread buffered bytes prove the peer still
     // sends (and the socket is open) — lets connected() skip every syscall.
-    bool hasBuffered() const
+    FORCE_INLINE bool hasBuffered() const
     {
         return _fill > _pos;
     }
 
-    int read(uint8_t *dst, size_t len)
+    FORCE_INLINE int read(uint8_t *dst, size_t len)
     {
         if (UNLIKELY(!dst || !len))
         {
@@ -169,22 +161,22 @@ public:
         return (int)toCopy;
     }
 
-    int peek()
+    FORCE_INLINE int peek()
     {
-        if (_pos == _fill && !fillBuffer())
+        if (UNLIKELY(_pos == _fill) && UNLIKELY(!fillBuffer()))
         {
             return -1;
         }
         return _buffer[_pos];
     }
 
-    size_t available()
+    FORCE_INLINE size_t available()
     {
         // Hot-path: when the local buffer already holds data, report it WITHOUT
         // issuing a FIONREAD ioctl syscall. Only query the socket when the buffer
         // is empty. In a tight read loop this eliminates the vast majority of
         // syscalls. Behavior is identical (returns total readable bytes).
-        if (_fill > _pos)
+        if (LIKELY(_fill > _pos))
             return _fill - _pos;
         return r_available();
     }

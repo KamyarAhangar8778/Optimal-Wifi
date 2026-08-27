@@ -22,6 +22,7 @@
 
 #include "Arduino.h"
 #include "Client.h"
+#include <Optimization/CompilerTraits.h>
 #include <memory>
 
 class WiFiClientSocketHandle;
@@ -58,34 +59,34 @@ public:
     {
     }
 
-    bool isBusy() const
+    FORCE_INLINE bool isBusy() const
     {
         return _len != 0;
     }
 
-    size_t pending() const
+    FORCE_INLINE size_t pending() const
     {
         return _len;
     }
 
-    void reset()
+    FORCE_INLINE void reset()
     {
         _buf = nullptr;
         _len = 0;
     }
 
-    void set(const uint8_t *buf, size_t len)
+    FORCE_INLINE void set(const uint8_t *buf, size_t len)
     {
         _buf = buf;
         _len = len;
     }
 
-    const uint8_t *data() const
+    FORCE_INLINE const uint8_t *data() const
     {
         return _buf;
     }
 
-    void advance(size_t n)
+    FORCE_INLINE void advance(size_t n)
     {
         if (n >= _len)
         {
@@ -192,7 +193,7 @@ public:
     // Pump the async connect. Returns 1 = connected, 0 = still handshaking,
     // -1 = failed or timed out (deadline = _timeout ms).
     int pollConnect();
-    bool isConnecting() const
+    FORCE_INLINE bool isConnecting() const
     {
         return _asyncConnState != ConnState::Idle;
     }
@@ -205,11 +206,11 @@ public:
     size_t writeAsync(const uint8_t *buf, size_t size);
     // Flush pending TX. Returns 1 = all flushed, 0 = still pending, -1 = error.
     int pollWrite();
-    size_t pendingWrite() const
+    FORCE_INLINE size_t pendingWrite() const
     {
         return _txView.pending();
     }
-    bool writeBusy() const
+    FORCE_INLINE bool writeBusy() const
     {
         return _txView.isBusy();
     }
