@@ -27,15 +27,15 @@
 class WiFiClientSocketHandle;
 class WiFiClientRxBuffer;
 
-struct EndpointCache
+struct alignas(4) EndpointCache
 {
-    mutable IPAddress peerIp;
-    mutable IPAddress localIp;
+    mutable bool valid;
     mutable uint16_t peerPort;
     mutable uint16_t localPort;
-    mutable bool valid;
+    mutable IPAddress peerIp;
+    mutable IPAddress localIp;
 
-    EndpointCache() : peerIp((uint32_t)0), localIp((uint32_t)0), peerPort(0), localPort(0), valid(false)
+    EndpointCache() : valid(false), peerPort(0), localPort(0), peerIp((uint32_t)0), localIp((uint32_t)0)
     {
     }
 
@@ -128,6 +128,7 @@ protected:
     bool _connected;
 
     void _handleBufferFailure(); // Cold-path error helper
+    static int _configureSocket(int fd, int timeout_ms);
     WiFiClientRxBuffer *_rx() const;
 
 public:

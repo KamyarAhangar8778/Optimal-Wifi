@@ -37,6 +37,36 @@
 // so the async implementation (WiFiClientAsync.cpp) can share them without
 // duplication.
 
+#define ROE_CFG(x, msg)                                                          \
+    {                                                                            \
+        if (((x) < 0))                                                           \
+        {                                                                        \
+            log_e("Setsockopt '" msg "' on fd %d failed. errno: %d, \"%s\"", fd, \
+                  errno, strerror(errno));                                     \
+            return -1;                                                           \
+        }                                                                        \
+    }
+
+// Shared socket tuning applied immediately after the TCP handshake completes.
+// Centralizing here eliminates duplicated setsockopt calls between blocking
+// connect() and async pollConnect().
+int WiFiClient::_configureSocket(int fd, int timeout_ms)
+{
+    struct timeval tv;
+    tv.tv_sec = timeout_ms / 1000;
+    tv.tv_usec = (timeout_ms % 1000) * 1000;
+
+    int rcvBuf = 8192;
+    setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &rcvBuf, sizeof(int)); // Best effort
+    ROE_CFG(setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcvBuf, sizeof(int)), "SO_RCVBUF");
+    ROE_CFG(setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)), "SO_SNDTIMEO");
+    ROE_CFG(setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)), "SO_RCVTIMEO");
+
+    int flag = 1;
+    ROE_CFG(setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag)), "TCP_NODELAY");
+    return 0;
+}
+
 void EndpointCache::refresh(int fd) const
 {
     if (valid || fd < 0)
@@ -164,8 +194,7 @@ int WiFiClient::connect(IPAddress ip, uint16_t port, int32_t timeout_ms)
     fcntl(sockfd, F_SETFL, fcntl(sockfd, F_GETFL, 0) | O_NONBLOCK);
 
     uint32_t ip_addr = ip;
-    struct sockaddr_in serveraddr;
-    memset((char *)&serveraddr, 0, sizeof(serveraddr));
+    struct sockaddr_in serveraddr = {};
     serveraddr.sin_family = AF_INET;
     memcpy((void *)&serveraddr.sin_addr.s_addr, (const void *)(&ip_addr), 4);
     serveraddr.sin_port = htons(port);
@@ -217,23 +246,10 @@ int WiFiClient::connect(IPAddress ip, uint16_t port, int32_t timeout_ms)
         }
     }
 
-#define ROE_WIFICLIENT(x, msg)                                                                                 \
-    {                                                                                                          \
-        if (((x) < 0))                                                                                         \
-        {                                                                                                      \
-            log_e("Setsockopt '" msg "'' on fd %d failed. errno: %d, \"%s\"", sockfd, errno, strerror(errno)); \
-            return 0;                                                                                          \
-        }                                                                                                      \
+    if (_configureSocket(sockfd, _timeout) < 0)
+    {
+        return 0;
     }
-    int rcvBuf = 8192;
-    setsockopt(sockfd, SOL_SOCKET, SO_SNDBUF, &rcvBuf, sizeof(int)); // Best effort - lwip may not support
-    ROE_WIFICLIENT(setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, &rcvBuf, sizeof(int)), "SO_RCVBUF");
-    ROE_WIFICLIENT(setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)), "SO_SNDTIMEO");
-    ROE_WIFICLIENT(setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)), "SO_RCVTIMEO");
-
-    // Enable TCP_NODELAY (disable Nagle's algorithm) for low-latency small packets
-    int flag = 1;
-    ROE_WIFICLIENT(setsockopt(sockfd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag)), "TCP_NODELAY");
 
     fcntl(sockfd, F_SETFL, fcntl(sockfd, F_GETFL, 0) & (~O_NONBLOCK));
     clientSocketHandle.reset(new WiFiClientSocketHandle(g.release())); // ownership transferred

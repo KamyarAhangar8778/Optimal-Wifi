@@ -44,8 +44,7 @@ bool WiFiClient::connectAsync(IPAddress ip, uint16_t port)
     fcntl(sockfd, F_SETFL, fcntl(sockfd, F_GETFL, 0) | O_NONBLOCK);
 
     uint32_t ip_addr = ip;
-    struct sockaddr_in serveraddr;
-    memset((char *)&serveraddr, 0, sizeof(serveraddr));
+    struct sockaddr_in serveraddr = {};
     serveraddr.sin_family = AF_INET;
     memcpy((void *)&serveraddr.sin_addr.s_addr, (const void *)(&ip_addr), 4);
     serveraddr.sin_port = htons(port);
@@ -127,25 +126,11 @@ int WiFiClient::pollConnect()
     }
 
     // Handshake done — apply the same tuning as the blocking path.
-#define ROE_ASYNC(x, msg)                                                           \
-    {                                                                               \
-        if (((x) < 0))                                                              \
-        {                                                                           \
-            log_e("Setsockopt '" msg "'' on fd %d failed. errno: %d", fd(), errno); \
-            stop();                                                                 \
-            return -1;                                                              \
-        }                                                                           \
+    if (_configureSocket(fd(), _timeout) < 0)
+    {
+        stop();
+        return -1;
     }
-    struct timeval tv;
-    tv.tv_sec = _timeout / 1000;
-    tv.tv_usec = (_timeout % 1000) * 1000;
-    int rcvBuf = 8192;
-    setsockopt(fd(), SOL_SOCKET, SO_SNDBUF, &rcvBuf, sizeof(int)); // best effort
-    ROE_ASYNC(setsockopt(fd(), SOL_SOCKET, SO_RCVBUF, &rcvBuf, sizeof(int)), "SO_RCVBUF");
-    ROE_ASYNC(setsockopt(fd(), SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)), "SO_SNDTIMEO");
-    ROE_ASYNC(setsockopt(fd(), SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)), "SO_RCVTIMEO");
-    int flag = 1;
-    ROE_ASYNC(setsockopt(fd(), IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag)), "TCP_NODELAY");
 
     _asyncConnState = ConnState::Idle;
     _connected = true;

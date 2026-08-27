@@ -159,14 +159,7 @@ public:
         size_t availableBytes = _fill - _pos;
         size_t toCopy = (len < availableBytes) ? len : availableBytes;
 
-        if (toCopy == 1)
-        {
-            *dst = _buffer[_pos];
-        }
-        else
-        {
-            memcpy(dst, _buffer + _pos, toCopy);
-        }
+        memcpy(dst, _buffer + _pos, toCopy);
 
         _pos += toCopy;
         if (_pos == _fill)
