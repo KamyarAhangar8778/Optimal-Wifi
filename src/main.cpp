@@ -6,6 +6,7 @@
 #include "test_sta.h"
 #include "test_sockets.h"
 #include "test_async_client.h"
+#include "test_fastfunction.h"
 #include "test_benchmark.h"
 
 TestStats g_stats;
@@ -66,6 +67,7 @@ void setup()
     run_sta_tests();
     run_socket_tests();
     run_async_client_tests();
+    run_fastfunction_tests();
 
     print_summary();
 
