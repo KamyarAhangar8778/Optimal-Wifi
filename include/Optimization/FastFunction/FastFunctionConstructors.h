@@ -38,11 +38,6 @@ struct FastFunctionVTableImpl {
     static_cast<DecayF*>(dest)->~DecayF();
   }
 
-  static void move(void* __restrict__ dest, void* __restrict__ src) HOT_PATH {
-    new (dest) DecayF(std::move(*static_cast<DecayF*>(src)));
-    MEMORY_BARRIER();
-  }
-
   static void copy(void* __restrict__ dest, const void* __restrict__ src) HOT_PATH {
     new (dest) DecayF(*static_cast<const DecayF*>(src));
     MEMORY_BARRIER();
@@ -50,7 +45,6 @@ struct FastFunctionVTableImpl {
 
   static constexpr FastFunctionVTable vtable = {
     &destroy,
-    &move,
     &copy
   };
 };

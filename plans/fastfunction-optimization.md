@@ -129,6 +129,26 @@ destructor). یعنی clear از قبل **رایگان (صفر هزینه)** ا�
 ### تغییر ۴ (اختیاری) — `FastFunctionInvoke.h`: ثبات کنترل ⏸️ بازماند
 `operator()` از قبل `FORCE_INLINE` و تمیز است؛ نیازی به تغییر ندارد.
 
+### تغییر ۵ — حذف DeadCode: `vtable.move` ✅ اعمال شد
+**یافته:** بعد از تغییر ۱ (حذف double-move)، دیگر هیچ‌جا `vtable_->move()` صدا
+زده نمی‌شد (grep تایید کرد). پس:
+- فیلد `move` در `FastFunctionVTable` (FastFunctionBase.h) → DeadCode.
+- متد `FastFunctionVTableImpl<DecayF>::move` (FastFunctionConstructors.h) برای
+  **هر تخصص functor** کامپایل می‌شد → سربار Flash تکراری.
+
+**عمل:** فیلد `move` از struct و متد `move` از `FastFunctionVTableImpl` حذف شد.
+فقط `destroy` + `copy` باقی ماندند (copy هنوز در copy-ctor/assign استفاده می‌شود).
+- سود: کاهش واقعی Flash (حذف DeadCode، بدون ریسک پرفورمنس — چون اصلاً صدا
+  نمی‌شد). ضرر پرفورمنس: صفر.
+- RAM: تغییر نکرد (vtable اشاره‌گر رو حفظ کردیم؛ فقط یک فیلد از struct رفت که
+  روی اندازه‌ی خودِ struct در Flash اثر داشت نه در هر نمونه شیء).
+
+**فرصت‌های رد‌شده (خارج از scope «فقط FastFunction»):**
+- کاهش RAM با حذف `data_` pointer از `ArrayBase` (SmallVector): چون storage همیشه
+  inline تا N است، `data_` ۴ بایت اضافه دارد. اما این تغییر SmallVector (پروژه جدا)
+  است → نزدیم.
+- حذف کل `vtable_`: نیاز به runtime type detection، ریسک corruption → رد شد.
+
 ---
 
 ## ۵. محدودیت‌ها (طبق CLAUDE.md / README)

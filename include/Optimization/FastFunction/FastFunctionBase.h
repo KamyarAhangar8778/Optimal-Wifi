@@ -11,7 +11,6 @@ namespace uniuno {
 
 struct FastFunctionVTable {
   void (*destroy)(void* dest);
-  void (*move)(void* __restrict__ dest, void* __restrict__ src);
   void (*copy)(void* __restrict__ dest, const void* __restrict__ src);
 };
 
