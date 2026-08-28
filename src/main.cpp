@@ -7,6 +7,7 @@
 #include "test_sockets.h"
 #include "test_async_client.h"
 #include "test_fastfunction.h"
+#include "test_atomicsharedptr.h"
 #include "test_benchmark.h"
 
 TestStats g_stats;
@@ -68,6 +69,7 @@ void setup()
     run_socket_tests();
     run_async_client_tests();
     run_fastfunction_tests();
+    run_atomicsharedptr_tests();
 
     print_summary();
 
