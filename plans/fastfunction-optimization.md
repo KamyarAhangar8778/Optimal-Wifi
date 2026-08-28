@@ -120,11 +120,21 @@ new (storage_.data()) DecayF(...);
 باقی ماند. کد تمیزتر + یک branch کمتر در سازنده.
 - سود: جزئی (چند نانوثانیه در سازنده). Flash ~۲۰۰ بایت کمتر.
 
-### تغییر ۳ — `FastFunctionMemory.h`: clear سبک‌تر ❌ رد شد (سود صفر)
-**دلیل:** `storage_.clear()` برای `std::max_align_t` (trivially-destructible)
+### تغییر ۳ — `FastFunctionMemory.h`: clear سبک‌تر ✅ اعمال شد
+**تحلیل:** `storage_.clear()` برای `std::max_align_t` (trivially-destructible)
 طبق `SmallVectorModifiers.h` خط ۷۰-۷۶ **فقط `size_ = 0` می‌کند** (بدون loop
-destructor). یعنی clear از قبل **رایگان (صفر هزینه)** است. تغییرش فقط کد را
-پیچیده‌تر می‌کرد بدون بهبود — طبق اصل Simplicity First اعمال نشد.
+destructor) — یعنی فقط یک فراخوانی تابع برای کار بی‌فایده. برای functor trivial
+(`vtable_ == nullptr`) این فراخوانی حذف شد: سازنده بعدی دوباره `force_set_size`
+می‌زند و move-assign قبل از موو `size` سورس رو کپی می‌کند، پس حذفش ایمن است.
+- سود: حذف یک call روی مسیر clear (که در هر move-assign/dtor صدا می‌شود).
+- RAM/Flash: تغییر ناچیز.
+
+**فرصت رد‌شده — حذف `data_` از ArrayBase:**
+کاهش ۴ بایت RAM به ازای هر SmallVector (و StaticArray) با حذف اشاره‌گر `data_`
+و جایگزینی با `is_heap_ ? heap_ptr_ : stack_storage_`. **طبق تایید کاربر انجام
+نشد:** چون ArrayBase زیربنای SmallVector/StaticArray است که Events/Timer/Async
+روی آن سوارند → ریسک خرابی کتابخونه‌های `include/`. به تعویق افتاد تا وقتی
+روی خودِ ArrayBase/SmallVector به صورت جداگانه کار کنیم.
 
 ### تغییر ۴ (اختیاری) — `FastFunctionInvoke.h`: ثبات کنترل ⏸️ بازماند
 `operator()` از قبل `FORCE_INLINE` و تمیز است؛ نیازی به تغییر ندارد.

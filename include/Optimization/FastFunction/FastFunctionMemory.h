@@ -26,7 +26,11 @@ void FastFunction<R(Args...), Capacity>::clear() {
     vtable_ = nullptr;
   }
   invoker_ = nullptr;
-  storage_.clear();
+  // storage_ holds std::max_align_t (trivially-destructible): storage_.clear()
+  // would only reset size_ (a function call for no real work). The next
+  // constructor re-marks the used slots via force_set_size(), and move-assign
+  // copies the source size before clearing, so skipping it here is safe and
+  // drops one call on the clear path.
 }
 
 } // namespace uniuno
