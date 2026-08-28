@@ -78,6 +78,18 @@ WiFiClient &WiFiClient::operator=(WiFiClient &&rhs)
     return *this;
 }
 
+// Copy shares the socket handle via shared_ptr — mirrors the original Arduino
+// WiFiClient (no move smantics existed there). Needed so third-party libs that
+// take a WiFiClient by value (e.g. ArduinoWebsockets) keep compiling.
+WiFiClient::WiFiClient(const WiFiClient &other)
+    : clientSocketHandle(other.clientSocketHandle),
+      _connected(other._connected), _timeout(other._timeout), _lastConnCheck(other._lastConnCheck),
+      _asyncConnState(other._asyncConnState), _asyncStartMs(other._asyncStartMs),
+      _txView(other._txView), _ep(), next(other.next)
+{
+    _ep.invalidate();
+}
+
 WiFiClient::~WiFiClient()
 {
     stop();

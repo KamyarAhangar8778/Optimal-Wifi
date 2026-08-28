@@ -138,6 +138,7 @@ public:
     WiFiClient(int fd);
     WiFiClient(WiFiClient &&rhs);            // transfer socket w/o refcount churn
     WiFiClient &operator=(WiFiClient &&rhs); // ditto
+    WiFiClient(const WiFiClient &other);     // shared-ownership copy (Arduino API compat)
     ~WiFiClient();
     int connect(IPAddress ip, uint16_t port);
     int connect(IPAddress ip, uint16_t port, int32_t timeout_ms);
