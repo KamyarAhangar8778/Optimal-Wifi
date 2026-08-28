@@ -27,14 +27,25 @@ Optimal-Wifi/
 │       ├── src/
 │       │   ├── WiFi.h / WiFi.cpp      # Facade اصلی (WiFiClass) مشتق از تمام لایه‌ها
 │       │   ├── WiFiGeneric.h/.cpp     # لایه‌ی ریشه (مدیریت Events، حالت‌ها، Sleep، توان TX)
-│       │   ├── WiFiSTA.h/.cpp         # لایه کلاینت (اتصال به مودم، دریافت IP، مدیریت DHCP)
-│       │   ├── WiFiAP.h/.cpp          # لایه اکسس‌پوینت (سافت‌AP، کانفیگ Subnet و IP محلی)
+│       │   ├── WiFiSTA.h/.cpp         # لایه کلاینت (اتصال به مودم، چرخه حیات و هندل وضعیت)
+│       │   ├── WiFiSTAConfig.cpp      # تنظیمات IP استاتیک، اسکن/امنیت و WPA2 Enterprise
+│       │   ├── WiFiSTANetif.cpp       # آدرس‌دهی و کوئری‌های رابط کلاینت (IP/MAC/Gateway/DNS)
+│       │   ├── WiFiSTAInfo.cpp        # استعلام‌های شبکه (SSID/BSSID/RSSI) و SmartConfig
+│       │   ├── WiFiSTAInternal.h      # هدر داخلی و توابع اشتراکی ماژول‌های کلاینت (Fast Inline)
+│       │   ├── WiFiAP.h/.cpp          # لایه اکسس‌پوینت (سافت‌AP، چرخه حیات و کانفیگ)
+│       │   ├── WiFiAPNetif.cpp        # آدرس‌دهی و کوئری‌های رابط شبکه softAP (IP/MAC/Host)
 │       │   ├── WiFiScan.h/.cpp        # اسکن همگام/ناهمگام شبکه‌های اطراف و پارس BSSID/RSSI
-│       │   ├── WiFiClient.h/.cpp      # سوکت TCP کلاینت و بافرینگ RX/TX
-│       │   ├── WiFiClientInternal.h   # کلاس‌های داخلی مشترک کلاینت (RX-buffer، Socket-handle)
+│       │   ├── WiFiClient.h/.cpp      # سوکت TCP کلاینت — هسته‌ی lifecycle/state
+│       │   ├── WiFiClientConnect.cpp  # مسیر اتصال + تنظیم سوکت قبل از handshake
+│       │   ├── WiFiClientSocketOps.cpp# گزینه‌های سوکت (setTimeout/NoDelay/...)
+│       │   ├── WiFiClientRead.cpp     # مسیر RX و تشخیص قطع اتصال (connected)
+│       │   ├── WiFiClientWrite.cpp    # مسیر TX (فرستادن بلوکینگ و حلقه‌ی loop-to-full)
+│       │   ├── WiFiClientEndpoints.cpp# نگهداری IP/پورت (EndpointCache و getpeername/getsockname)
+│       │   ├── WiFiClientInternal.h   # کلاس‌های داخلی مشترک کلاینت (RX-buffer، Socket-handle، FdGuard)
 │       │   ├── WiFiClientAsync.cpp    # اتصال/ارسال آسنکرون غیربلوکینگ (Poll State-Machine)
 │       │   ├── WiFiServer.h/.cpp      # سرور TCP با قابلیت پذیرش کلاینت‌ها
-│       │   ├── WiFiUdp.h/.cpp         # سوکت ارسال/دریافت بسته‌های بدون اتصال UDP
+│       │   ├── WiFiUdp.h/.cpp         # سوکت UDP — lifecycle و مسیر ارسال (TX)
+│       │   ├── WiFiUdpRx.cpp          # مسیر دریافت UDP (parsePacket/available/read)
 │       │   ├── WiFiMulti.h/.cpp       # مدیریت اتصال هوشمند و خودکار به لیست APها
 │       │   └── WiFiType.h             # تایپ‌ها، انوم‌های وضعیت (wl_status_t) و ماکروها
 │       └── library.properties
@@ -59,7 +70,12 @@ Optimal-Wifi/
 │       ├── test_ap.cpp/.h             # تست چرخه حیات SoftAP و تنظیم IP سفارشی
 │       ├── test_sta.cpp/.h            # تست اتصال به روتر، DHCP، ریکانکت و استاتیک IP
 │       ├── test_sockets.cpp/.h        # تست ارتباط دوطرفه TCP Client/Server و پکت UDP
-│       └── test_async_client.cpp/.h   # تست connect/write آسنکرون + بنچمارک stall در برابر حالت بلوکینگ
+│       ├── test_async_client.cpp/.h   # Runner تست‌های آسنکرون (فقط فراخوانی سوئیت‌ها)
+│       ├── test_async_client_helpers.h# ثابت‌ها/کمک‌کننده‌های مشترک (pattern_byte، pump_connect)
+│       ├── test_async_client_cases.h  # اعلان ۶ تابع تست برای TUهای مجزا
+│       ├── test_async_client_connect.cpp # تست اتصال آسنکرون + بنچمارک stall (blocking vs async)
+│       ├── test_async_client_data.cpp # تست bulk write و endpoint cache / connected
+│       └── test_async_client_write.cpp# تست slice latency و move semantics
 │
 └── platformio.ini                     # تنظیمات کامپایلر، بردهای ESP32 و مسیرهای Include
 ```
