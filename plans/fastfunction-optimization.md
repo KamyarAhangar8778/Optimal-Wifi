@@ -110,14 +110,24 @@ new (storage_.data()) DecayF(...);
 - حفظ رفتار: موو-ctor/assign باید سورس را در حالت معتبر (empty) رها کند.
 - معیار: حذف یک `memcpy` + یک move-ctor + یک `MEMORY_BARRIER` در هر move برای non-trivial.
 
-### تغییر ۲ — `FastFunctionConstructors.h`: ادغام reserve+set_size
-یک متد کمکی در SmallVector (یا مستقیم اینجا) که inline storage رو در یک گام آماده کنه بدون فراخوانی دوگانه. اگر SmallVector فعلاً راه مستقیم نداره، از `resize`-سبک استفاده کن.
+### تغییر ۲ — `FastFunctionConstructors.h`: حذف `reserve` اضافی ✅ اعمال شد
+**تحلیل:** `storage_` یک `SmallVector<std::max_align_t, N>` است. `reserve_pod`
+(در `ArrayBase.cpp` خط ۲۹) وقتی `new_cap <= capacity_` باشد **سریع برمی‌گردد**
+(فقط یک branch) — چون capacity از اول = N است. پس برای functorهای inline
+(که تو Capacity جا می‌شوند، رایج‌ترین حالت) `reserve` عملاً no-op است.
 
-### تغییر ۳ — `FastFunctionMemory.h`: clear سبک‌تر
-وقتی `vtable_` ناله (trivial) و فقط `invoker_` ست، `storage_.clear()` رو فقط در صورت نیاز صدا بزن (معمولاً تفاوت ناچیز؛ فقط اگر پروفایل تایید کرد).
+**عمل:** `storage_.reserve(required_elements)` حذف شد؛ فقط `force_set_size`
+باقی ماند. کد تمیزتر + یک branch کمتر در سازنده.
+- سود: جزئی (چند نانوثانیه در سازنده). Flash ~۲۰۰ بایت کمتر.
 
-### تغییر ۴ (اختیاری) — `FastFunctionInvoke.h`: ثبات کنترل
-`operator()` از قبل `FORCE_INLINE`. میتونیم مطمئن شیم `invoker_` مستقیم صدا میشه بدون بررسی اضافی. (در حال حاضر تمیزه — فقط برای اطمینان.)
+### تغییر ۳ — `FastFunctionMemory.h`: clear سبک‌تر ❌ رد شد (سود صفر)
+**دلیل:** `storage_.clear()` برای `std::max_align_t` (trivially-destructible)
+طبق `SmallVectorModifiers.h` خط ۷۰-۷۶ **فقط `size_ = 0` می‌کند** (بدون loop
+destructor). یعنی clear از قبل **رایگان (صفر هزینه)** است. تغییرش فقط کد را
+پیچیده‌تر می‌کرد بدون بهبود — طبق اصل Simplicity First اعمال نشد.
+
+### تغییر ۴ (اختیاری) — `FastFunctionInvoke.h`: ثبات کنترل ⏸️ بازماند
+`operator()` از قبل `FORCE_INLINE` و تمیز است؛ نیازی به تغییر ندارد.
 
 ---
 

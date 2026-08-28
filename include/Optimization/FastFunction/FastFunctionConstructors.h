@@ -74,11 +74,11 @@ template<typename F, typename>
 FastFunction<R(Args...), Capacity>::FastFunction(F&& f) {
   using DecayF = typename std::decay<F>::type;
 
-  // Reserve the exact storage needed without element-by-element push_back loop.
-  // SmallVector handles dynamic grow if sizeof(DecayF) > inline Capacity.
+  // storage_ is a SmallVector<std::max_align_t, N>; its inline capacity is N
+  // elements from construction, so reserve() is a no-op for any functor that
+  // fits inline (the common case). We only need to mark the used slots.
   const size_t required_elements =
     (sizeof(DecayF) + sizeof(std::max_align_t) - 1) / sizeof(std::max_align_t);
-  storage_.reserve(required_elements);
   storage_.force_set_size(required_elements);
 
   // Placement-new the functor directly into the aligned storage
