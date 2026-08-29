@@ -96,11 +96,13 @@ static void print_section(const char *name)
 }
 
 // Wait for `client` to have at least `need` bytes available, with a budget.
-static bool wait_avail(WiFiClient &client, size_t need, uint32_t budgetMs)
+// Uses yield() (not delay) so the WiFi/lwIP background task keeps servicing
+// the connection; delayMicroseconds would starve it on single-core.
+static bool wait_avail(WiFiClient &client, size_t need, uint32_t budgetUs)
 {
-    uint32_t w = millis();
-    while ((uint32_t)client.available() < need && (millis() - w) < budgetMs)
-        delayMicroseconds(10);
+    uint32_t s = micros();
+    while ((uint32_t)client.available() < need && (micros() - s) < budgetUs)
+        yield();
     return (uint32_t)client.available() >= need;
 }
 
@@ -114,9 +116,6 @@ static bool run_ping_pong(WiFiClient &client, WiFiClient &serverClient,
     maxUs = 0;
     totalUs = 0;
 
-    uint32_t local[kPingRounds];
-    uint8_t rx[kPingRounds];
-    (void)local;
     uint8_t *rxb = (uint8_t *)malloc(len);
     if (!rxb)
     {
@@ -128,9 +127,10 @@ static bool run_ping_pong(WiFiClient &client, WiFiClient &serverClient,
     {
         uint32_t s = micros();
         client.write(frame, len);
-        client.flush();
-
-        if (!wait_avail(serverClient, len, 1000))
+        // NOTE: deliberately no flush() — flush() blocks until the peer ACKs,
+        // which would conflate application latency with TCP ACK-timing. We only
+        // want kernel-accept latency (the moment send() returns).
+        if (!wait_avail(serverClient, len, 1000000))
         {
             ok = false;
             free(rxb);
@@ -138,9 +138,8 @@ static bool run_ping_pong(WiFiClient &client, WiFiClient &serverClient,
         }
         serverClient.read(rxb, len);
         serverClient.write(rxb, len);
-        serverClient.flush();
-
-        if (!wait_avail(client, len, 1000))
+        // server reply must be kernel-accepted; no flush needed for RTT.
+        if (!wait_avail(client, len, 1000000))
         {
             ok = false;
             free(rxb);
@@ -175,6 +174,9 @@ void run_mqtt_latency_benchmark()
     delay(1000);
     WiFi.softAP("ESP32_Latency_AP", "12345678");
     delay(500);
+
+    // Disable modem sleep so RX latency isn't inflated by beacon-interval gaps.
+    WiFi.setSleep(false);
 
     IPAddress hostIP = WiFi.softAPIP();
     const uint16_t port = 9191;
@@ -216,12 +218,9 @@ void run_mqtt_latency_benchmark()
     if (run_ping_pong(client, serverClient, frame, kMqttFrameSize,
                       minUs, maxUs, totalUs, ok) && ok)
     {
-        uint32_t slowCount = 0;
-        // re-scan totalUs for slow (>50ms) — recompute from avg is fine for a quick count
         Serial.printf("  -> avg : %.0f us\n", (float)totalUs / kPingRounds);
         Serial.printf("  -> min : %u us\n", minUs);
         Serial.printf("  -> max : %u us\n", maxUs);
-        (void)slowCount;
     }
     else
     {
