@@ -20,9 +20,10 @@
 #include "WiFiClient.h"
 #include "WiFiClientInternal.h"
 #include <lwip/sockets.h>
+#include <sys/poll.h>
 #include <errno.h>
 
-static constexpr uint32_t WIFI_CLIENT_CONN_CHECK_MS = 50;
+static constexpr uint32_t WIFI_CLIENT_CONN_CHECK_MS = 10;
 
 int WiFiClient::read()
 {
@@ -109,42 +110,44 @@ uint8_t WiFiClient::connected()
         if ((now - _lastConnCheck) >= WIFI_CLIENT_CONN_CHECK_MS)
         {
             _lastConnCheck = now;
-            uint8_t dummy;
-            int res = recv(fd(), &dummy, 1, MSG_PEEK | MSG_DONTWAIT);
-            if (res == 0)
-            {
-                // Peer closed connection cleanly (received TCP FIN)
-                _connected = false;
-            }
-            else if (res < 0)
+            // poll() with zero timeout checks TCP socket state WITHOUT entering
+            // the data path (unlike recv(MSG_PEEK) which copies a byte from the
+            // RX queue). POLLHUP fires on peer FIN; POLLERR/POLLHUP on RST.
+            struct pollfd pfd;
+            pfd.fd = fd();
+            pfd.events = POLLIN; // data available OR connection closed
+            pfd.revents = 0;
+            int res = poll(&pfd, 1, 0);
+            if (res < 0)
             {
                 switch (errno)
                 {
-                case EWOULDBLOCK:
-#if defined(EAGAIN) && (EAGAIN != EWOULDBLOCK)
-                case EAGAIN:
-#endif
-                case ENOENT: // caused by vfs
-                    _connected = true;
-                    break;
-                case ENOTCONN:
-                case EPIPE:
-                case ECONNRESET:
-                case ECONNREFUSED:
-                case ECONNABORTED:
                 case EBADF:
                     _connected = false;
-                    log_d("Disconnected: RES: %d, ERR: %d", res, errno);
+                    log_d("Disconnected: fd closed");
                     break;
                 default:
-                    log_i("Unexpected: RES: %d, ERR: %d", res, errno);
-                    _connected = true;
+                    _connected = true; // transient — assume connected
                     break;
                 }
             }
+            else if (res == 0)
+            {
+                // No events: socket is idle but open (no data, no close)
+                _connected = true;
+            }
             else
             {
-                _connected = true;
+                // revents non-zero: data pending (POLLIN) or connection torn down
+                if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL))
+                {
+                    _connected = false;
+                    log_d("Disconnected: revents: 0x%x", pfd.revents);
+                }
+                else
+                {
+                    _connected = true; // POLLIN: data or graceful close — hasBuffered() covers it
+                }
             }
         }
     }

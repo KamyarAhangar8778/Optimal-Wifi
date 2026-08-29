@@ -10,6 +10,7 @@
 #include "test_atomicsharedptr.h"
 #include "test_benchmark.h"
 #include "test_latency_benchmark.h"
+#include "test_latency_optimizations.h"
 
 TestStats g_stats;
 
@@ -72,6 +73,7 @@ void setup()
     run_fastfunction_tests();
     run_atomicsharedptr_tests();
     run_mqtt_latency_benchmark();
+    run_latency_optimization_tests();
 
     print_summary();
 

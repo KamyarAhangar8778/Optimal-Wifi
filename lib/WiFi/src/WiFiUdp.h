@@ -47,7 +47,7 @@ private:
   IPAddress remote_ip;
   uint16_t server_port;
   uint16_t remote_port;
-  char *tx_buffer;
+  char tx_buffer[1460];  // inline static buffer: zero malloc/free, zero cross-instance sharing
   size_t tx_buffer_len;
   cbuf *rx_buffer;
 

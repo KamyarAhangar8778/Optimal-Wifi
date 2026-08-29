@@ -22,6 +22,8 @@
 #include "WiFi.h"
 #include <lwip/sockets.h>
 #include <errno.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 size_t WiFiClient::write(uint8_t data)
 {
@@ -58,22 +60,44 @@ size_t WiFiClient::write(const uint8_t *buf, size_t size)
             return totalSent;
         }
 
-        // Buffer-full path: bounded select-retry. Wait in short slices and push
-        // the moment the buffer frees up. The budget is derived from millis()
-        // (NOT a retry count) so timer quantization can't overshoot it.
+        // Buffer-full path: bounded spin-then-block. We use a zero-timeout
+        // taskYIELD() spin for the first ~500us — at loopback latency the peer
+        // (or kernel TX completion) frees buffer space within a few loop
+        // iterations, so a 1ms quantized delay() or a 10ms select slice
+        // would dwarf the actual RTT by 3-20x. Only if the spin budget is
+        // exhausted do we fall back to select() for the remainder of the
+        // timeout, which re-checks the deadline each iteration to avoid
+        // overshooting.
         uint32_t startMs = millis();
+        const uint32_t spinBudgetUs = 500; // sub-millisecond spin: covers typical ACK turnaround
+        uint32_t spinStartUs = micros();
         while (true)
         {
             uint32_t waitedMs = millis() - startMs;
             if (waitedMs >= (uint32_t)_timeout)
             {
-                // Budget exhausted: report a short write but KEEP the
-                // connection — the caller may retry later.
-                return totalSent;
+                return totalSent; // budget exhausted
             }
+            // Spin phase: tight taskYIELD loop, no select syscall overhead
+            if ((micros() - spinStartUs) < spinBudgetUs)
+            {
+                taskYIELD(); // cooperative: lets lwIP poll task run, no 1ms quantization
+                res = send(fd(), (void *)(buf + totalSent), size - totalSent, MSG_DONTWAIT);
+                if (res > 0)
+                {
+                    totalSent += (size_t)res;
+                    break; // back to outer loop for the (possibly empty) tail
+                }
+                if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)
+                {
+                    stop();
+                    return totalSent;
+                }
+                continue;
+            }
+
+            // Fallback: select with a short slice bounded by remaining budget
             uint32_t remainMs = (uint32_t)_timeout - waitedMs;
-            // Cap the slice at 10ms: bounds worst-case loop stall tightly, and
-            // the final slice shrinks to exactly the remaining budget.
             suseconds_t sliceUs =
                 (remainMs >= 10) ? 10000 : (suseconds_t)(remainMs * 1000);
 
@@ -112,8 +136,9 @@ size_t WiFiClient::write_P(PGM_P buf, size_t size)
 
 size_t WiFiClient::write(Stream &stream)
 {
-    // Reentrant stack buffer (512B aligned to 4 bytes): saves 1KB .bss RAM and prevents multithreading data race
-    uint8_t buf[512] __attribute__((aligned(4)));
+    // Reentrant stack buffer (1460B = MSS-aligned, 4-byte aligned): maximizes
+    // per-call send() efficiency for streaming writes (MQTT/WS chunked bodies).
+    uint8_t buf[1460] __attribute__((aligned(4)));
     size_t written = 0;
     while (true)
     {

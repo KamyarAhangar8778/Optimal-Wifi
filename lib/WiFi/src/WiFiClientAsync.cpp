@@ -190,7 +190,31 @@ int WiFiClient::pollWrite()
     }
     if (errno == EWOULDBLOCK || errno == EAGAIN || errno == EINTR)
     {
-        return 0; // kernel TX buffer still full — retry next iteration
+        // Kernel TX buffer momentarily full: tight spin with taskYIELD()
+        // to avoid the caller having to re-enter on the next loop() tick
+        // (which could be 1-5ms away). Covers the typical sub-100us window
+        // in which lwIP frees TX space. Falls through to return 0 if the
+        // spin budget is exhausted, letting the caller re-poll.
+        uint32_t spinStartUs = micros();
+        while ((micros() - spinStartUs) < 250)
+        {
+            taskYIELD();
+            res = send(fd(), (void *)_txView.data(), _txView.pending(), MSG_DONTWAIT);
+            if (res > 0)
+            {
+                _txView.advance((size_t)res);
+                if (!_txView.isBusy())
+                    return 1; // fully flushed during spin
+                return 0; // partial progress, still draining
+            }
+            if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)
+            {
+                _txView.reset();
+                stop();
+                return -1;
+            }
+        }
+        return 0; // spin exhausted — caller re-polls
     }
     // Hard error: drop the pending view and tear down.
     _txView.reset();

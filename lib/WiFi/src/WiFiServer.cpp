@@ -62,16 +62,21 @@ WiFiClient WiFiServer::available()
   }
   if (client_sock >= 0)
   {
-    int val = 1;
-    if (setsockopt(client_sock, SOL_SOCKET, SO_KEEPALIVE, (char *)&val, sizeof(int)) >= 0)
-    {
-      // Hot path: lwip sockets already default to Nagle enabled. Only issue
-      // the TCP_NODELAY syscall when the user actually wants it disabled —
-      // saves one setsockopt per accepted connection in the common case.
-      if (!_noDelay || (setsockopt(client_sock, IPPROTO_TCP, TCP_NODELAY,
-                                   (char *)&val, sizeof(int)) == 0))
-        return WiFiClient(client_sock);
-    }
+    // Disable Nagle by default on accepted connections — for small MQTT/WS
+    // frames every millisecond matters and Nagle delays sub-MSS writes until
+    // the ACK clocks the next segment. The _noDelay flag is kept for API
+    // compat but defaults to false (meaning: Nagle OFF on the wire).
+    int flag = _noDelay ? 0 : 1;
+    setsockopt(client_sock, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+
+    // Inherit the listen socket's 22KB buffers (already set on the parent)
+    // by explicitly matching them here — guarantees consistency regardless
+    // of lwIP default inheritance behavior across ESP-IDF versions.
+    int bufSize = 22 * 1024;
+    setsockopt(client_sock, SOL_SOCKET, SO_SNDBUF, &bufSize, sizeof(bufSize));
+    setsockopt(client_sock, SOL_SOCKET, SO_RCVBUF, &bufSize, sizeof(bufSize));
+
+    return WiFiClient(client_sock);
   }
   return WiFiClient();
 }
@@ -94,6 +99,15 @@ void WiFiServer::begin(uint16_t port, int enable)
   if (sockfd < 0)
     return;
   setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(int));
+
+  // Larger socket buffers on the listen socket propagate to accepted
+  // connections (they inherit SO_SNDBUF/SO_RCVBUF at accept time). This
+  // matches WiFiClient::_configureSocket's 22KB and keeps the loopback
+  // path from stalling on default 8KB buffers.
+  int bufSize = 22 * 1024;
+  setsockopt(sockfd, SOL_SOCKET, SO_SNDBUF, &bufSize, sizeof(bufSize));
+  setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, &bufSize, sizeof(bufSize));
+
   server.sin_family = AF_INET;
   server.sin_addr.s_addr = _addr;
   server.sin_port = htons(_port);

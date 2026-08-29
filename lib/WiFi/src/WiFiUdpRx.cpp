@@ -34,8 +34,6 @@ int WiFiUDP::parsePacket()
 
   struct sockaddr_in si_other;
   int slen = sizeof(si_other), len;
-  // Static staging buffer: zero heap traffic on every poll (the old code
-  // malloc+free'd on EVERY call, even when no packet was waiting).
   static char stagingBuf[1460];
   if ((len = recvfrom(udp_server, stagingBuf, 1460, MSG_DONTWAIT, (struct sockaddr *)&si_other, (socklen_t *)&slen)) == -1)
   {
@@ -50,8 +48,6 @@ int WiFiUDP::parsePacket()
   remote_port = ntohs(si_other.sin_port);
   if (len > 0)
   {
-    // Steady state reuses one cbuf across packets -> zero allocations per
-    // packet. Only grows when a datagram larger than current buffer arrives.
     if (!rx_buffer || rx_buffer->size() < ((size_t)len + 1))
     {
       delete rx_buffer;
@@ -64,7 +60,7 @@ int WiFiUDP::parsePacket()
     rx_buffer->flush();
     if (rx_buffer->write(stagingBuf, len) != (size_t)len)
     {
-      return 0; // defensive: never expose a partially-filled packet
+      return 0;
     }
   }
   return len;

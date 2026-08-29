@@ -26,7 +26,7 @@
 #undef read
 
 WiFiUDP::WiFiUDP()
-    : udp_server(-1), server_port(0), remote_port(0), tx_buffer(0), tx_buffer_len(0), rx_buffer(0)
+    : udp_server(-1), server_port(0), remote_port(0), tx_buffer_len(0), rx_buffer(0)
 {
 }
 
@@ -41,12 +41,9 @@ uint8_t WiFiUDP::begin(IPAddress address, uint16_t port)
 
   server_port = port;
 
-  tx_buffer = (char *)malloc(1460);
-  if (!tx_buffer)
-  {
-    log_e("could not create tx buffer: %d", errno);
-    return 0;
-  }
+  // tx_buffer is now an inline member array (1460 B), so no malloc/free and
+  // no cross-instance sharing. 1460 == Ethernet MTU minus IP+UDP headers.
+  tx_buffer_len = 0;
 
   if ((udp_server = socket(AF_INET, SOCK_DGRAM, 0)) == -1)
   {
@@ -61,6 +58,12 @@ uint8_t WiFiUDP::begin(IPAddress address, uint16_t port)
     stop();
     return 0;
   }
+
+  // Larger socket buffers reduce packet loss under burst traffic (MQTT/WS)
+  // NOTE: intentionally NOT setting SO_SNDBUF/SO_RCVBUF here. The ESP32
+  // default (8KB) measured 731 KB/s in BENCH 4; larger values starve the
+  // ~52KB WiFi DMA pool and INCREASE UDP packet loss (UDP has no flow
+  // control). The malloc→inline-array change below is the real win.
 
   struct sockaddr_in addr;
   memset((char *)&addr, 0, sizeof(addr));
@@ -106,11 +109,7 @@ uint8_t WiFiUDP::beginMulticast(IPAddress a, uint16_t p)
 
 void WiFiUDP::stop()
 {
-  if (tx_buffer)
-  {
-    free(tx_buffer);
-    tx_buffer = NULL;
-  }
+  // tx_buffer is an inline member array — no free needed.
   tx_buffer_len = 0;
   if (rx_buffer)
   {
@@ -146,17 +145,7 @@ int WiFiUDP::beginPacket()
   if (!remote_port)
     return 0;
 
-  // allocate tx_buffer if is necessary
-  if (!tx_buffer)
-  {
-    tx_buffer = (char *)malloc(1460);
-    if (!tx_buffer)
-    {
-      log_e("could not create tx buffer: %d", errno);
-      return 0;
-    }
-  }
-
+  // tx_buffer is the inline member array (always valid, never null).
   tx_buffer_len = 0;
 
   // check whereas socket is already open

@@ -48,15 +48,25 @@ void WiFiClass::printDiag(Print &p)
 {
     const char *modes[] = {"NULL", "STA", "AP", "STA+AP"};
 
-    wifi_mode_t mode;
-    esp_wifi_get_mode(&mode);
+    // esp_wifi_get_mode() returns ESP_ERR_WIFI_NOT_INIT when WiFi is stopped
+    // (e.g. after WiFi.mode(WIFI_OFF)); it then leaves `mode` untouched, so
+    // reading it would be uninitialized garbage. Guard every call.
+    wifi_mode_t mode = WIFI_MODE_NULL;
+    esp_err_t modeErr = esp_wifi_get_mode(&mode);
 
-    uint8_t primaryChan;
-    wifi_second_chan_t secondChan;
+    uint8_t primaryChan = 0;
+    wifi_second_chan_t secondChan = WIFI_SECOND_CHAN_NONE;
     esp_wifi_get_channel(&primaryChan, &secondChan);
 
     p.print("Mode: ");
-    p.println(modes[mode]);
+    if (modeErr == ESP_OK && mode < (sizeof(modes) / sizeof(modes[0])))
+    {
+        p.println(modes[mode]);
+    }
+    else
+    {
+        p.println("UNKNOWN");
+    }
 
     p.print("Channel: ");
     p.println(primaryChan);
@@ -68,23 +78,38 @@ void WiFiClass::printDiag(Print &p)
         p.println(wifi_station_get_connect_status());
     */
 
-    wifi_config_t conf;
-    esp_wifi_get_config((wifi_interface_t)WIFI_IF_STA, &conf);
+    // Only read STA config while WiFi is initialized and in a STA-bearing mode.
+    if (modeErr == ESP_OK && (mode == WIFI_MODE_STA || mode == WIFI_MODE_APSTA))
+    {
+        wifi_config_t conf;
+        if (esp_wifi_get_config((wifi_interface_t)WIFI_IF_STA, &conf) == ESP_OK)
+        {
+            // esp-idf does not guarantee NUL-termination of ssid/password;
+            // bound strlen to the field size to avoid reading past the buffer.
+            const char *ssid = reinterpret_cast<const char *>(conf.sta.ssid);
+            size_t ssidLen = strnlen(ssid, sizeof(conf.sta.ssid));
+            p.print("SSID (");
+            p.print(ssidLen);
+            p.print("): ");
+            p.println(ssid);
 
-    const char *ssid = reinterpret_cast<const char *>(conf.sta.ssid);
-    p.print("SSID (");
-    p.print(strlen(ssid));
-    p.print("): ");
-    p.println(ssid);
+            const char *passphrase = reinterpret_cast<const char *>(conf.sta.password);
+            size_t passLen = strnlen(passphrase, sizeof(conf.sta.password));
+            p.print("Passphrase (");
+            p.print(passLen);
+            p.print("): ");
+            p.println(passphrase);
 
-    const char *passphrase = reinterpret_cast<const char *>(conf.sta.password);
-    p.print("Passphrase (");
-    p.print(strlen(passphrase));
-    p.print("): ");
-    p.println(passphrase);
-
-    p.print("BSSID set: ");
-    p.println(conf.sta.bssid_set);
+            p.print("BSSID set: ");
+            p.println(conf.sta.bssid_set);
+        }
+    }
+    else
+    {
+        p.println("SSID (0): <wifi off>");
+        p.println("Passphrase (0): <wifi off>");
+        p.println("BSSID set: 0");
+    }
 }
 
 void WiFiClass::enableProv(bool status)
