@@ -66,6 +66,21 @@ int WiFiClient::_configureSocket(int fd, int timeout_ms)
 
     int flag = 1;
     ROE_CFG(setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag)), "TCP_NODELAY");
+
+    // Aggressive TCP keep-alive so long-lived MQTT/WS connections stay
+    // detectable through NAT/firewall idle timeouts (typically 30-300s).
+    // The stock ESP32 default is a 2-HOUR idle — a silent teardown there
+    // surfaces only on the next send as a multi-second reconnect storm, the
+    // single largest real-world latency killer for always-on pub/sub. Probes
+    // fire ONLY while the socket is idle, so active traffic is never touched.
+    int ka = 1;
+    setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &ka, sizeof(ka)); // best-effort
+    int kaIdle = 30;                                           // first probe after 30s idle
+    int kaIntvl = 5;                                           // every 5s thereafter
+    int kaCnt = 3;                                             // give up after 3 misses (~45s)
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &kaIdle, sizeof(kaIdle));
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &kaIntvl, sizeof(kaIntvl));
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &kaCnt, sizeof(kaCnt));
     return 0;
 }
 

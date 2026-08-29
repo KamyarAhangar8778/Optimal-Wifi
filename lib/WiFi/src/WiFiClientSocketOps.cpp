@@ -86,3 +86,14 @@ bool WiFiClient::getNoDelay()
     getOption(TCP_NODELAY, &flag);
     return flag;
 }
+
+int WiFiClient::setKeepAlive(bool enable, int idleSec, int intervalSec, int count)
+{
+    int on = enable ? 1 : 0;
+    int res = setSocketOption(SOL_SOCKET, SO_KEEPALIVE, &on, sizeof(on));
+    if (res < 0 || !enable)
+        return res;
+    setSocketOption(IPPROTO_TCP, TCP_KEEPIDLE, &idleSec, sizeof(idleSec));
+    setSocketOption(IPPROTO_TCP, TCP_KEEPINTVL, &intervalSec, sizeof(intervalSec));
+    return setSocketOption(IPPROTO_TCP, TCP_KEEPCNT, &count, sizeof(count));
+}

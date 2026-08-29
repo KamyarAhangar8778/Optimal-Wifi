@@ -97,6 +97,9 @@ void run_latency_optimization_tests()
     serverClient.setNoDelay(true);
 
     // ---- Test 1: Micro-packet roundtrip latency (22B MQTT-like) ----
+    // Also reports ONE-WAY radio latency (client->air->server) by splitting the
+    // RTT at the server-side echo: this isolates the ESP32 radio floor from any
+    // server-side delay. On loopback both halves are the self->air->self path.
     print_section("[OPT L1] Micro-packet roundtrip (22B x 200, tight poll)");
     uint8_t frame[22];
     for (size_t i = 0; i < 22; i++)
@@ -104,6 +107,7 @@ void run_latency_optimization_tests()
 
     uint8_t rxbuf[22];
     uint32_t minUs = 0xFFFFFFFF, maxUs = 0, totalUs = 0;
+    uint32_t oneWayMin = 0xFFFFFFFF, oneWayMax = 0, oneWayTotal = 0;
     uint32_t successCount = 0;
 
     for (int i = 0; i < 200; ++i)
@@ -114,17 +118,24 @@ void run_latency_optimization_tests()
         {
             continue;
         }
+        uint32_t t1 = micros(); // server RX arrived = one-way TX over radio done
         serverClient.read(rxbuf, 22);
         serverClient.write(rxbuf, 22);
         if (!wait_avail_tight(client, 22, 50000))
         {
             continue;
         }
+        uint32_t t2 = micros(); // client RX arrived = echo over radio done
         client.read(rxbuf, 22);
         uint32_t d = micros() - s;
         if (d < minUs) minUs = d;
         if (d > maxUs) maxUs = d;
         totalUs += d;
+        // One-way = server delivery latency (client->air->server).
+        uint32_t ow = t1 - s;
+        if (ow < oneWayMin) oneWayMin = ow;
+        if (ow > oneWayMax) oneWayMax = ow;
+        oneWayTotal += ow;
         successCount++;
     }
 
@@ -134,6 +145,9 @@ void run_latency_optimization_tests()
         Serial.printf("  -> min : %u us\n", minUs);
         Serial.printf("  -> max : %u us\n", maxUs);
         Serial.printf("  -> sent: %u / 200\n", (unsigned)successCount);
+        Serial.printf("  -> one-way (client->server): avg %.0f / min %u / max %u us\n",
+                      (float)oneWayTotal / successCount, oneWayMin, oneWayMax);
+        Serial.println("     NOTE: loopback = self->air->self; this is the ESP32 radio floor.");
     }
 
     // ---- Test 2: connected() hot-path syscall cost ----

@@ -185,6 +185,12 @@ public:
     int setNoDelay(bool nodelay);
     bool getNoDelay();
 
+    // Aggressive TCP keep-alive for long-lived MQTT/WS links. A silent teardown
+    // by a NAT/firewall (idle timeout 30-300s) otherwise surfaces only on the
+    // next send as a multi-second reconnect. Probes fire ONLY while idle, so
+    // active traffic is never touched. Defaults: 30s idle, 5s probe, 3 misses.
+    int setKeepAlive(bool enable, int idleSec = 30, int intervalSec = 5, int count = 3);
+
     // ---- Asynchronous API (non-blocking, poll-driven) ----
     // Start a TCP handshake without stalling loop(). Returns false only on
     // immediate failure (socket/DNS). Progress it with pollConnect().
