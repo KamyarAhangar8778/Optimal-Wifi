@@ -66,7 +66,7 @@ bool WiFiClient::connectAsync(IPAddress ip, uint16_t port)
         return false; // guard closes the descriptor
     }
 
-    clientSocketHandle.reset(new WiFiClientSocketHandle(g.release())); // ownership transferred
+    clientSocketHandle = uniuno::AtomicSharedPtr<WiFiClientSocketHandle>::make(g.release()); // ownership transferred
     _txView.reset();
     _ep.invalidate();
     _asyncConnState = ConnState::Connecting;

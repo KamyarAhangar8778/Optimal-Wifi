@@ -30,7 +30,7 @@ WiFiClientRxBuffer *WiFiClient::_rx() const
 
 // Delegating constructor: one shared member-init chain, zero duplicated code.
 WiFiClient::WiFiClient()
-    : clientSocketHandle(nullptr), _connected(false), _timeout(WIFI_CLIENT_DEF_CONN_TIMEOUT_MS),
+    : clientSocketHandle(), _connected(false), _timeout(WIFI_CLIENT_DEF_CONN_TIMEOUT_MS),
       _lastConnCheck(0), _asyncConnState(ConnState::Idle), _asyncStartMs(0),
       _txView(), _ep(), next(NULL)
 {
@@ -38,7 +38,7 @@ WiFiClient::WiFiClient()
 
 WiFiClient::WiFiClient(int fd) : WiFiClient()
 {
-    clientSocketHandle.reset(new WiFiClientSocketHandle(fd));
+    clientSocketHandle = uniuno::AtomicSharedPtr<WiFiClientSocketHandle>::make(fd);
     _connected = true;
 }
 
@@ -115,7 +115,7 @@ void WiFiClient::stop()
     _asyncConnState = ConnState::Idle;
     _txView.reset();
     _ep.invalidate();
-    clientSocketHandle = nullptr;
+    clientSocketHandle.reset();
     _connected = false;
 }
 
@@ -132,7 +132,7 @@ bool WiFiClient::operator==(const WiFiClient &rhs)
 
 int WiFiClient::fd() const
 {
-    if (clientSocketHandle == NULL)
+    if (!clientSocketHandle)
     {
         return -1;
     }

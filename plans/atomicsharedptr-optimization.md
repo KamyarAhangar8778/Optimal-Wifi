@@ -98,31 +98,50 @@ First اعمال نشد.
   API رو میشکنه (طبق API stability نباید). پس DeadCode واقعی نداریم مگر اینکه
   توی تحلیل دقیق پیدا شه.
 
-### تغییر ۴ (اختیاری) — inline storage برای T کوچک ⏳ در دست بررسی
-مثل FastFunction: اگه `sizeof(T) <= N` باشه، `State` رو در استک (یا عضو کلاس)
-نگه داریم نه heap. **ریسک بالا** (تغییر معماری + ممکنه کتابخونه خراب شه).
+### تغییر ۴ (اختیاری) — inline storage برای T کوچک ❌ رد شد (UNSAFE برای shared)
 
-**بنچمارک پایه (واقعی، روی ESP32):**
+**پیاده‌سازی شده بود** (buffer ۱۶ بایتی `std::max_align_t[2]` درون کلاس + `is_inline_`
+flag + placement-new وقتی `sizeof(State) <= 16`) ولی **خراب بود** (use-after-free)
+و برگشت داده شد (revert به نسخه‌ی تمیز HEAD).
+
+**علت رد — باگ معماری (fundamental):**
+`AtomicSharedPtr` یک **shared** pointer هست (State با refcount بین همه‌ی کپی‌ها
+مشترکه). توی اون پیاده‌سازی، buffer در **هر نمونه** جدا ساخته میشد. پس اگه نمونه‌ی
+«مالک» (که State توی buffer خودش داشت) زودتر از کپی‌هاش نابود میشد → کپی‌ها به
+buffer آزادشده اشاره می‌کردن → **use-after-free / double-free قطعی**.
+
+این دقیقاً توی پروژه رخ می‌ده: `include/Core/Async/Deferred.h` عضو
+`AtomicSharedPtr<AsyncResult<O,E>> state` رو داره و اون رو copy/move می‌کنه (در
+مسیر آسنکرون کپی معمولاً بیشتر از اصل زنده می‌مونه) → crash.
+
+**تست‌های قبلی اشتباه رو نمی‌گرفتن:** `test_asp_copy_ctor` چون orig و cpy تو یک
+scope زنده‌ان، کپی از buffer خودش (نامعتبر) می‌خوند که UB و «شانسی» pass میشد.
+
+**تست‌های رگرسیون جدید اضافه شد** (توی `test_atomicsharedptr.cpp`):
+- `test_asp_owner_dies_first` — owner میمیره، کپی زنده می‌مونه (lifetime safety)
+- `test_asp_interleaved_lifetimes` — چند کپی با ترتیب نابودی درهم‌تنیده
+
+این دو تست توی نسخه‌ی خراب می‌افتادن، توی نسخه‌ی تمیز (برگشت‌خورده) PASS میشن.
+
+**چرا روش FastFunction کار نمی‌کنه؟** FastFunction یک **single-owner** functor
+holder هست (هر نمونه functor مستقل خودش رو داره، کپی = deep copy). ولی shared_ptr
+معنایش اشتراک State هست → inline-per-instance ذاتاً ناایمنه.
+
+**راه ایمن برای گرفتن برد سرعت (تغییر معماری بزرگ‌تر — نیاز به تایید):**
+تنها راه ایمنِ حذف `new` برای shared، یه **fixed-size arena / pool** مشترک هست
+(نه buffer در هر نمونه). این تغییر معماری بزرگیه و باید جداگانه تصمیم‌گیری و
+بنچمارک شود — در حال حاضر طبق «کتابخونه خراب نشه» اعمال نشد.
+
+**وضعیت نهایی بنچمارک (نسخه تمیز، بیس‌لاین جدید):**
 ```
-make  : 11236 ns/op   ← گرون‌ترین (new)
-reset : 15865 ns/op   ← گرون‌ترین (delete)
-copy  :   235 ns/op   ← ارزان
-deref :    25 ns/op   ← خیلی ارزان
+Flash: 793085 bytes (بیس‌لاین پس از revert)
+make  : ~11236 ns/op   (new)
+reset : ~15865 ns/op   (delete)
+copy  :  ~  235 ns/op
+deref :  ~   25 ns/op
 ```
-**تحلیل:** `make`/`reset` (new/delete) **~۴۰۰ برابر** گرون‌تر از deref هستن.
-این تایید کرد گلوگاه اصلی همون heap alloc/dealloc هست (نه اتمیک). اگه inline storage
-اعمال شه، انتظار میره make/reset از ~۱۱-۱۵ µs به ~۲۰۰ ns برسن (**~۵۰x سریع‌تر**).
-
-**روش پیشنهادی (ایمن):** buffer ۱۶ بایتی (`std::max_align_t[2]`) درون کلاس اضافه
-کنیم. اگه `sizeof(State) <= 16` باشه → placement-new روی buffer (بدون new). وگرنه
-→ heap fallback (مثل قبل). چون توی پروژه Tهای AtomicSharedPtr کوچیکن (callbackها،
-socket handle)، ۹۰٪ مواقع inline میشه و RAM اضافه ناچیزه.
-
-**بده‌بستانی:** هر نمونه `AtomicSharedPtr` الان `sizeof(T)+alignment+۴+۴` بایت
-استک/RAM اضافه می‌گیره. طبق CLAUDE.md جدید فقط در صورت ارزشمند بودن.
-
-**تایید:** با تست standalone (۷/۷ PASS شد) + تست‌های WiFi، اگه PASS موند و
-Flash/RAM منطقی بود → اعمال میشه. در غیر این صورت رد.
+گلوگاه اصلی همون Heap alloc/dealloc (`new`/`delete`) هست — نه اتمیک. بدون تغییر ۴
+این هزینه باقی‌ می‌ماند (اما کد صحیح و ایمنه).
 
 ---
 
@@ -195,12 +214,51 @@ heap alloc/dealloc هست نه اتمیک → تغییر ۴ (inline storage) ب�
 
 ## ۸. چه چیزهایی بهتر میشه؟ (تحلیل CPU/RAM/Flash)
 
-| تغییر | CPU | RAM | Flash | ریسک |
-|-------|-----|-----|-------|------|
-| uint16_t refcount (تغییر ۲) | صفر/ناچیز | **−۲ بایت/نمونه** | کمی کمتر | کم |
-| inline storage (تغییر ۴) | **−new/delete در hot path** | +N بایت استک | کمتر کد | **بالا** |
+| تغییر | CPU | RAM | Flash | ریسک | وضعیت |
+|-------|-----|-----|-------|------|--------|
+| uint16_t refcount (تغییر ۲) | صفر/ناچیز | −۲ بایت/نمونه | کمی کمتر | کم | ❌ رد شد (Flash بدتر) |
+| inline storage (تغییر ۴) | −new/delete در hot path | +N بایت استک | کمتر کد | **بحرانی** | ❌ رد شد (UAF برای shared) |
 | حذف atomic (تغییر ۱) | سریع‌تر | صفر | کمتر | **بحرانی** (رد شد) |
 
-**نتیجه:** بهینه‌سازی AtomicSharedPtr بیشتر روی **حذف heap alloc (تغییر ۴)** و
-**کاهش اندازه State (تغییر ۲)** تمرکز داره. CPU از نظر deref تمیزه؛ گلوگاه اصلی
-`new`/`delete` هست نه عملیات اتمیک.
+---
+
+## ۹. گزینه C — انتقال `lib/WiFi` از `std::shared_ptr` به `AtomicSharedPtr` ✅ انجام شد
+
+**هدف:** یکپارچگی کل پروژه روی یک smart pointer واحد (`uniuno::AtomicSharedPtr`) +
+آماده‌سازی برای بهینه‌سازی‌های آینده (arena/pool).
+
+**تغییرات (فقط داخلی — API عمومی `WiFiClient` دست‌نخورده ماند):**
+- `lib/WiFi/src/WiFiClient.h:122` — `std::shared_ptr` → `uniuno::AtomicSharedPtr`
+- `lib/WiFi/src/WiFiClient.cpp` — همه‌ی محل‌های استفاده:
+  - `reset(new X(...))` → `AtomicSharedPtr<X>::make(...)`
+  - `= nullptr` → `reset()`
+  - `== NULL` → `!ptr` (bool check)
+  - `std::move` / copy / `==` / `->` / `?` — بدون تغییر (در API هستن)
+- `lib/WiFi/src/WiFiClientConnect.cpp` + `WiFiClientAsync.cpp` — `reset(new ...)` → `make(...)`
+- `include/Optimization/AtomicSharedPtr.h` — اضافه شد: `operator==`, `operator!=`,
+  const `operator*`, const `operator->` (میرور `std::shared_ptr` رفتار)
+- `lib/WiFi/src/WiFiClientInternal.h` — `rx()` بدون تغییر ماند (const operator-> مثل
+  std برمی‌گرده `T*` نه `const T*` تا callers شکسته نشن)
+
+**نتیجه بیلد (واقعی، روی ESP32 / esp32dev):**
+```
+Flash:  792021 bytes (بیس‌لاین std::shared_ptr)
+      → 792725 bytes (AtomicSharedPtr)   [+704 bytes, ~0.09% افزایش — ناچیز]
+RAM:    70560 bytes (تغییر نکرد)
+```
+
+**تحلیل:** برد سرعتی چشمگیری **حاصل نشد** چون قبلاً هم `std::shared_ptr` استفاده
+می‌شد (تعداد heap alloc یکی موند). ارزش واقعی:
+1. **یکپارچگی:** کل پروژه حالا روی یک smart pointer واحد (حذف وابستگی libstdc++ دوتا).
+2. **API stability:** هیچ امضای عمومی `WiFiClient` عوض نشد → پروژه‌ی کاربر کامپایل می‌مونه.
+3. **آمادگی arena/pool:** حالا که همه روی `AtomicSharedPtr` هستن، می‌تونیم یه
+   fixed-size pool اضافه کنیم و سرعت واقعی (حذف new/delete) رو بگیریم بدون شکستن API.
+
+**تست:** بیلد SUCCESS ✅. تست‌های سریال (`test_sockets`, `test_async_client` و غیره)
+رو نمی‌تونم روی دستگاه اجرا کنم — باید تو `device monitor` چک بشن.
+
+---
+
+**نتیجه کلی:** بهینه‌سازی AtomicSharedPtr بیشتر روی **حذف heap alloc (تغییر ۴ / arena)**
+و **کاهش اندازه State (تغییر ۲)** تمرکز داره. CPU از نظر deref تمیزه؛ گلوگاه اصلی
+`new`/`delete` هست نه عملیات اتمیک. گزینه C یکپارچگی رو بدون شکستن API تضمین کرد.

@@ -23,7 +23,7 @@
 #include "Arduino.h"
 #include "Client.h"
 #include <Optimization/CompilerTraits.h>
-#include <memory>
+#include <Optimization/AtomicSharedPtr.h>
 
 class WiFiClientSocketHandle;
 class WiFiClientRxBuffer;
@@ -119,7 +119,7 @@ protected:
         Connecting
     };
 
-    std::shared_ptr<WiFiClientSocketHandle> clientSocketHandle;
+    uniuno::AtomicSharedPtr<WiFiClientSocketHandle> clientSocketHandle;
     AsyncTxView _txView;    // zero-copy pending TX view into caller buffer
     EndpointCache _ep;      // cached TCP endpoints
     int _timeout;

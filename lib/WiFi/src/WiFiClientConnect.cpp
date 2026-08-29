@@ -142,7 +142,7 @@ int WiFiClient::connect(IPAddress ip, uint16_t port, int32_t timeout_ms)
     }
 
     fcntl(sockfd, F_SETFL, fcntl(sockfd, F_GETFL, 0) & (~O_NONBLOCK));
-    clientSocketHandle.reset(new WiFiClientSocketHandle(g.release())); // ownership transferred
+    clientSocketHandle = uniuno::AtomicSharedPtr<WiFiClientSocketHandle>::make(g.release()); // ownership transferred
     _txView.reset();
     _asyncConnState = ConnState::Idle;
     _ep.invalidate();

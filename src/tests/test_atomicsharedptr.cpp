@@ -154,6 +154,66 @@ void test_asp_shared_refcount()
 }
 
 // ---------------------------------------------------------------------------
+// Correctness: owner dies first, copy outlives it (lifetime safety)
+// This is the REAL usage in Deferred.h (AtomicSharedPtr<AsyncResult> member
+// that gets copied/moved). A per-instance inline buffer would dangle here.
+// ---------------------------------------------------------------------------
+void test_asp_owner_dies_first()
+{
+    TEST_CASE_START("AtomicSharedPtr owner-dies-before-copy");
+
+    struct Rec {
+        int id;
+        Rec(int i) : id(i) { g_asp_alive++; }
+        Rec(const Rec& o) : id(o.id) { g_asp_alive++; }
+        ~Rec() { g_asp_alive--; }
+    };
+    g_asp_alive = 0;
+
+    uniuno::AtomicSharedPtr<Rec> copy;
+    {
+        uniuno::AtomicSharedPtr<Rec> owner = uniuno::AtomicSharedPtr<Rec>::make(42);
+        copy = owner;                              // share state
+        TEST_ASSERT(g_asp_alive == 1, "extra alloc on share");
+        // owner destroyed here
+    }
+    TEST_ASSERT(g_asp_alive == 1, "object freed while copy alive (use-after-free!)");
+    TEST_ASSERT((*copy).id == 42, "copy lost value after owner died");
+    copy.reset();
+    TEST_ASSERT(g_asp_alive == 0, "leak: object not freed on last reset");
+
+    TEST_PASS();
+}
+
+// ---------------------------------------------------------------------------
+// Correctness: multi-copy across scopes, interleaved destruction order
+// ---------------------------------------------------------------------------
+void test_asp_interleaved_lifetimes()
+{
+    TEST_CASE_START("AtomicSharedPtr interleaved lifetimes");
+
+    struct Rec {
+        Rec() { g_asp_alive++; }
+        ~Rec() { g_asp_alive--; }
+    };
+    g_asp_alive = 0;
+
+    uniuno::AtomicSharedPtr<Rec> a = uniuno::AtomicSharedPtr<Rec>::make();
+    {
+        uniuno::AtomicSharedPtr<Rec> b(a);
+        uniuno::AtomicSharedPtr<Rec> c;
+        c = a;                                    // c shares with a,b
+        TEST_ASSERT(g_asp_alive == 1, "extra alloc on copy/share");
+        // b and c destroyed here; a still alive
+    }
+    TEST_ASSERT(g_asp_alive == 1, "over-free on interleaved dtor");
+    a.reset();
+    TEST_ASSERT(g_asp_alive == 0, "leak on last reset after interleaved");
+
+    TEST_PASS();
+}
+
+// ---------------------------------------------------------------------------
 // Benchmark: measure make / copy / deref / reset cost on serial
 // ---------------------------------------------------------------------------
 void bench_atomicsharedptr()
@@ -217,5 +277,7 @@ void run_atomicsharedptr_tests()
     test_asp_reset_last();
     test_asp_leak_stress();
     test_asp_shared_refcount();
+    test_asp_owner_dies_first();
+    test_asp_interleaved_lifetimes();
     bench_atomicsharedptr();
 }
