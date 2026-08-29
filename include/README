@@ -557,9 +557,54 @@ CPU_NOP()                       // nop
 
 ---
 
-## ۹. نحوه‌ی صحیح استفاده (از گیرهای پروژه‌ی Optimal-Wifi)
+نکته‌های Low-Latency برای MQTT / WebSocket / WSS
+================================================
 
-### ۹-۱. نام متدهای Timer — حتماً با T بزرگ
+اگه دیتای تو پروژه‌ات باید با **کم‌ترین تاخیر** برسه و فرستاده بشه (مثل پیام‌های
+MQTT یا فریم‌های WS)، ترکیب زیر رو قبل از `connect`/`connectAsync` بزن:
+
+```cpp
+WiFi.mode(WIFI_STA);           // یا AP بسته به مد
+WiFi.begin(ssid, pass);
+while (WiFi.status() != WL_CONNECTED) delay(10);
+
+// ۱. رادیوی وای‌فای رو خاموش نکن — برای دریافت لحظه‌ای (MQTT ping / WS real-time)
+//    مهمه که رادیو همیشه آماده دریافت باشه.
+WiFi.setSleep(false);          // معادل WIFI_PS_NONE
+
+// ۲. سوکت رو آماده کن:
+WiFiClient client;
+client.setNoDelay(true);       // ← Nagle را خاموش می‌کنه؛ پیام‌های کوچیک
+                              //    بدون صبر فرستاده می‌شن.
+client.connect(serverIP, 1883);
+
+// ۳. برای ارسال سریع غیربلوکینگ و صفر‑کپی از آسنکرون استفاده کن:
+size_t sent = client.writeAsync(payload, len); // بدون بلاک شدن
+while (client.writeBusy()) {                    // تا وقتی کرنل فضا داشته باشه
+    client.pollWrite();                         // پیشروی صف بدون هیچ تاخیری
+    yield();                                    // لطفاً به FreeRTOS اجازه بده
+}
+// writeAsync تعداد بایت‌هایی رو برمی‌گردونه که کرنل پذیرفته. اگه کمتر از len
+// باشه، بقیه به‌عنوان view صفر‑کپی در بافر کلاینت نگهداری می‌شه و توسط
+// pollWrite فلاش می‌شه — هیچ alloc یا کپی اضافی نداره.
+```
+
+> نکته: تو `lib/WiFi` بافرهای سوکت (`SO_SNDBUF`/`SO_RCVBUF`) روی **۲۲KB**
+> تنظیم شدن، بنابرین پنجره‌ی TCP درست می‌شه و می‌تونی بسته‌های کوچیک رو بدون
+> تاخیر ACK-clocking ارسال کنی. این تنظیمات در `_configureSocket` اعمال
+> می‌شه؛ فقط کافیه `setNoDelay(true)` صدا بزنی.
+
+### محدودیت‌های شناخته‌شده در ESP32 / lwIP
+- **TCP ACK-delay (~200ms):** lwIP ESP32 از `TCP_QUICKACK` پشتیبانی نمی‌کنه.
+  دریافت ACK سرور ممکنه تا ۲۰۰ms طول بکشه اگه بسته‌ها در همان لحظه نرفته باشن.
+  راه‌حل: از `setNoDelay(true)` + ارسال keep-alive/heartbeat یا از `writeAsync`
+  برای فشار دادن فوری استفاده کنید.
+
+---
+
+## ۱۰. نحوه‌ی صحیح استفاده (از گیرهای پروژه‌ی Optimal-Wifi)
+
+### ۱۰-۱. نام متدهای Timer — حتماً با T بزرگ
 ```cpp
 Timer timer(features);
 timer.setTimeout(cb, ms);        // نه set_timeout
@@ -571,7 +616,7 @@ h.cancel();                      // کنسل با handle
 timer.clear_timeout(h.getId());  // یا با TimerId خام
 ```
 
-### ۹-۲. EventDispatcher و Timer eventها — فقط function pointer (بدون capture)
+### ۱۰-۲. EventDispatcher و Timer eventها — فقط function pointer (بدون capture)
 ```cpp
 // ❌ اشتباه: لامبدای captureدار قبول نمیشه
 d.on<PingEvent>([&cnt](PingEvent* e){ cnt++; });   // خطای کامپایل

@@ -204,6 +204,11 @@ public:
     // zero-copy view into the CALLER's buffer — it must stay valid and
     // unmodified until writeBusy() turns false. Rejects (returns 0) while a
     // previous chunk is still flushing.
+    //
+    // Usage (lowest-latency TX for small MQTT/WS frames):
+    //   size_t sent = client.writeAsync(frame, len);
+    //   while (client.writeBusy()) { client.pollWrite(); yield(); }
+    //   (or: while (client.pollWrite() == 0) yield(); )
     size_t writeAsync(const uint8_t *buf, size_t size);
     // Flush pending TX. Returns 1 = all flushed, 0 = still pending, -1 = error.
     int pollWrite();

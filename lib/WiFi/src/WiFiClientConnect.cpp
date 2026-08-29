@@ -52,8 +52,14 @@ int WiFiClient::_configureSocket(int fd, int timeout_ms)
         tv.tv_usec = (timeout_ms % 1000) * 1000;
     }
 
-    int rcvBuf = 8192;
-    setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &rcvBuf, sizeof(int)); // Best effort
+    // Larger socket buffers improve throughput and reduce latency under bursty
+    // small-message traffic (MQTT/WS): a bigger advertised window keeps the
+    // peer sending without waiting for ACK-clocking round trips. lwIP on ESP32
+    // honors these sizes up to its internal caps; the values below are safe,
+    // well-supported defaults that fit comfortably in the 320KB RAM budget.
+    int sndBuf = 22 * 1024; // 22528 bytes
+    int rcvBuf = 22 * 1024;
+    setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sndBuf, sizeof(int)); // Best effort
     ROE_CFG(setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcvBuf, sizeof(int)), "SO_RCVBUF");
     ROE_CFG(setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)), "SO_SNDTIMEO");
     ROE_CFG(setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)), "SO_RCVTIMEO");

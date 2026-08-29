@@ -9,6 +9,7 @@
 #include "test_fastfunction.h"
 #include "test_atomicsharedptr.h"
 #include "test_benchmark.h"
+#include "test_latency_benchmark.h"
 
 TestStats g_stats;
 
@@ -70,6 +71,7 @@ void setup()
     run_async_client_tests();
     run_fastfunction_tests();
     run_atomicsharedptr_tests();
+    run_mqtt_latency_benchmark();
 
     print_summary();
 
